@@ -80,7 +80,7 @@ const C = {
   approval: [0.961, 0.647, 0.141] as RGB,
   question: [0.133, 0.827, 0.933] as RGB,
   error: [0.957, 0.314, 0.369] as RGB,
-  finished: [0.204, 0.831, 0.6] as RGB,
+  finished: [0.133, 0.827, 0.933] as RGB, // cyan: green belongs to Spotify
   ratelimit: [0.984, 0.573, 0.235] as RGB,
   sleeping: [0.58, 0.635, 0.722] as RGB,
   dizzy: [0.957, 0.447, 0.714] as RGB,

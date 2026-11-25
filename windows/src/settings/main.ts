@@ -15,7 +15,7 @@ import { closedIsland } from "../core/closed";
 import type { UpdateStatus } from "../core/update";
 import { SOUND_NAMES } from "../core/sound";
 import {
-  MAX_DECLARED, PILL_CATEGORIES, availablePills, chooseMainPill, isComingSoon, mainPillChoices,
+  MAX_DECLARED, PILL_CATEGORIES, availablePills, chooseMainPill, isComingSoon, mainPillChoices, pillDefinition,
   sanitizeDeclared, toggleDeclared, type PillDefinition,
 } from "../core/pills";
 import { h, clear } from "../views/dom";
@@ -26,6 +26,8 @@ import { agentsSection } from "./agents";
 import { phoneSection } from "./phone";
 import { whatsappSection } from "./whatsapp";
 import { WHATSAPP_ID } from "../core/whatsapp";
+import { NOTIF_ID } from "../core/notifications";
+import { notificationsSection } from "./notifications";
 import { updateRows, updatesListener } from "./updates";
 import { colorDot } from "./colors";
 import { renderDiff, statusDot } from "./parts";
@@ -886,6 +888,9 @@ const INTEGRATIONS: IntegrationDef[] = [
     fields: [{ key: "calcom-api-key", label: N_("API key"), placeholder: "cal_…", secret: true }] },
   // Nothing to enter: Spotify is read from the OS (src-tauri/src/spotify.rs).
   { id: "integration_spotify", name: "Spotify", color: "#1DB954", fields: [] },
+  // Nothing to enter either: whatever plays on the PC that is not Spotify (src-tauri/src/media.rs).
+  { id: "integration_media", name: "Media", color: pillDefinition("integration_media")?.color ?? "#FF0000", fields: [],
+    hint: N_("Anything playing that is not Spotify: a YouTube tab, a video player. Spotify keeps its own pill.") },
 ];
 
 const MAX_ACTIVE = MAX_DECLARED;
@@ -979,6 +984,27 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
 
   updateNote();
   return h("section", {}, h("h2", {}, h("span", { text: t("Integrations") })), note, list);
+}
+
+/** Windows notifications (the new way, no third-party software): its pill has its own switch. */
+function notificationsSections(): HTMLElement[] {
+  if (!availablePills().some((p) => p.id === NOTIF_ID)) return [];
+  return [notificationsSection({
+    toggle,
+    maxPills: MAX_ACTIVE,
+    pillActive: () => settings.activeIntegrations.includes(NOTIF_ID),
+    setPill: (on) => {
+      const has = settings.activeIntegrations.includes(NOTIF_ID);
+      if (on && !has && settings.activeIntegrations.length < MAX_ACTIVE) {
+        settings.activeIntegrations = [...settings.activeIntegrations, NOTIF_ID];
+      } else if (!on && has) {
+        settings.activeIntegrations = settings.activeIntegrations.filter((x) => x !== NOTIF_ID);
+      } else {
+        return;
+      }
+      declaredChanged();
+    },
+  })];
 }
 
 /** WhatsApp (experimental), under the other integrations: its pill is turned on from its own switch. */
@@ -1541,7 +1567,7 @@ async function render() {
     pills: () => [activePillsSection(connected)],
     agents: () => [claudeSection(status), agentsSection(agents), planSection(status)],
     chat: () => [subscriptionsSection(), apiSection(hasKey, claudeRelay), chatProvidersSection(chatKeys, keyChanged), localSection(customKey)],
-    integrations: () => [integrationsSection(present), ...whatsappSections()],
+    integrations: () => [integrationsSection(present), ...notificationsSections(), ...whatsappSections()],
     phone: () => [phoneSection(settings.phoneLink ?? false, toggle, settings)],
     shortcuts: () => [shortcutsSection(shortcutReport)],
   };

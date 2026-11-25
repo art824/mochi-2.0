@@ -299,7 +299,7 @@ export function whatsappSection(host: WhatsAppSettingsHost): HTMLElement {
   const section = h(
     "section",
     {},
-    h("h2", {}, h("i", { class: "dot", style: `background:${WHATSAPP_GREEN}` }), h("span", { text: t("WhatsApp (experimental)") })),
+    h("h2", {}, h("i", { class: "dot", style: `background:${WHATSAPP_GREEN}` }), h("span", { text: t("WhatsApp via gateway (old way, third-party software)") })),
     h("div", { class: "hint", style: hintStyle("#F5B83D"), text: t("Unofficial integration: it goes through a gateway you run on this computer. Use it on your own account only. WhatsApp may restrict accounts that abuse it.") }),
     h("div", { class: "row" }, h("label", { text: t("Show my WhatsApp messages") }), enableSwitch),
     body,

@@ -8,6 +8,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { Settings } from "./state";
 import type { RecapHistory, RecapPrefs } from "../recap/summary";
 import type { SpotifyState } from "./spotify";
+import type { MediaState } from "./media";
 import type { UpdateStatus } from "./update";
 import type { WaIslandView, WaSettingsView, WaTestResult } from "./whatsapp";
 
@@ -388,6 +389,10 @@ export const Bridge = {
   chatSend: (query: string, context: ChatContext | null, mail = false) =>
     callOrThrow<{ text: string }>("chat_send", { query, context, mail }),
   chatReset: () => call<void>("chat_reset"),
+  /** The island's Copy button: the last dictation, whole, onto the clipboard. */
+  flowCopyLast: () => call<boolean>("flow_copy_last"),
+  /** The turns the chat remembers, saved from earlier runs too. */
+  chatHistory: () => call<{ role: "user" | "assistant"; content: string }[]>("chat_history"),
   /**
    * The models a provider offers, for the picker in the chat view. Rust asks
    * the provider only when it has a key (or a server address).
@@ -486,6 +491,13 @@ export const Bridge = {
   whatsappClose: (chat: string) => call<void>("whatsapp_close", { chat }),
   /** The card's ↗: WhatsApp Desktop at the open conversation, or WhatsApp Web without it. */
   whatsappOpenApp: () => call<boolean>("whatsapp_open_app"),
+  /** Windows notifications (toast_wa.rs): true = every app, false = WhatsApp only. */
+  toastScopeGet: () => call<boolean>("toast_scope_get"),
+  toastScopeSet: (all: boolean) => call<void>("toast_scope_set", { all }),
+  /** "Media" (media.rs): the last report, and the card's buttons. */
+  mediaState: () => call<MediaState>("media_state"),
+  mediaControl: (action: "playpause" | "next" | "prev" | "seek", value?: number) =>
+    call<boolean>("media_control", { action, value: value ?? null }),
   /** Enter or the send button only. True once the gateway took it. */
   whatsappSend: (chat: string, text: string) => call<boolean>("whatsapp_send", { chat, text }),
   /** A chat id, or (Settings) a phone number. */

@@ -48,6 +48,94 @@ pub struct ModelInfo {
 #[derive(Default)]
 pub struct Chat {
     inner: Mutex<Conversation>,
+    /// Where the plain turns are kept between runs. Only the main chat has one:
+    /// the phone's chat stays in memory.
+    file: Option<std::path::PathBuf>,
+}
+
+/// Most messages kept on disk (a turn is two), so the file never grows without end.
+const KEEP_MESSAGES: usize = 200;
+
+fn history_file() -> std::path::PathBuf {
+    crate::settings::local_dir().join("chat-history.json")
+}
+
+/// The turns saved by an earlier run. Anything that doesn't look exactly like
+/// plain user/assistant text is dropped whole rather than half-trusted.
+fn load_plain(file: &std::path::Path) -> Vec<Value> {
+    let Ok(text) = std::fs::read_to_string(file) else { return Vec::new() };
+    let Ok(turns) = serde_json::from_str::<Vec<Value>>(&text) else { return Vec::new() };
+    let valid = turns.iter().enumerate().all(|(i, t)| {
+        let want = if i % 2 == 0 { "user" } else { "assistant" };
+        t["role"] == want && t["content"].is_string()
+    });
+    if valid && turns.len() % 2 == 0 { turns } else { Vec::new() }
+}
+
+fn save_plain(file: &std::path::Path, plain: &[Value]) {
+    // Keep whole turns, newest last, so the file always starts with the user.
+    let start = plain.len().saturating_sub(KEEP_MESSAGES) / 2 * 2;
+    let Some(dir) = file.parent() else { return };
+    if crate::platform::ensure_private_dir(dir).is_err() {
+        return;
+    }
+    let Ok(json) = serde_json::to_string(&plain[start..]) else { return };
+    let tmp = file.with_extension("json.tmp");
+    if std::fs::write(&tmp, json).is_ok() {
+        let _ = std::fs::rename(&tmp, file);
+    }
+}
+
+/// Starter file for the user's standing instructions. Lines starting with `#`
+/// are notes to the user and never reach the model.
+const INSTRUCTIONS_TEMPLATE: &str = "# Suas instruções permanentes para o Mochi.\n\
+# Tudo o que você escrever aqui (fora estas linhas que começam com #) é\n\
+# acrescentado ao final das instruções do Mochi em TODA conversa.\n\
+# Salve o arquivo e comece um chat novo para valer.\n\
+#\n\
+# Exemplo (apague o # para usar):\n\
+# Fale sempre em português do Brasil, de forma direta e curta.\n";
+
+fn instructions_file() -> std::path::PathBuf {
+    crate::settings::local_dir().join("custom-instructions.txt")
+}
+
+/// Creates the starter file once, so the user has something to open and edit.
+fn ensure_instructions_file() {
+    let file = instructions_file();
+    if file.exists() {
+        return;
+    }
+    if let Some(dir) = file.parent() {
+        if crate::platform::ensure_private_dir(dir).is_err() {
+            return;
+        }
+    }
+    let _ = std::fs::write(&file, INSTRUCTIONS_TEMPLATE);
+}
+
+/// The user's instructions without the `#` note lines, or None when empty.
+fn custom_instructions() -> Option<String> {
+    let raw = std::fs::read_to_string(instructions_file()).ok()?;
+    let kept: Vec<&str> = raw
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect();
+    let text = kept.join("\n");
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.chars().take(8000).collect())
+    }
+}
+
+fn with_instructions(base: String, custom: Option<String>) -> String {
+    match custom {
+        Some(c) => format!("{base}\n\nThe user's own standing instructions. Follow them:\n{c}"),
+        None => base,
+    }
 }
 
 #[derive(Default)]
@@ -72,10 +160,26 @@ pub struct Turn {
 }
 
 impl Chat {
+    /// The main chat: remembers its turns across restarts.
+    pub fn persistent() -> Self {
+        ensure_instructions_file();
+        let file = history_file();
+        let plain = load_plain(&file);
+        Chat { inner: Mutex::new(Conversation { plain, ..Default::default() }), file: Some(file) }
+    }
+
+    /// The remembered turns, for the chat window to show again.
+    pub fn plain_turns(&self) -> Vec<Value> {
+        self.inner.lock().unwrap().plain.clone()
+    }
+
     pub fn reset(&self) {
         let mut c = self.inner.lock().unwrap();
         let epoch = c.epoch + 1;
         *c = Conversation { epoch, ..Default::default() };
+        if let Some(file) = &self.file {
+            let _ = std::fs::remove_file(file);
+        }
     }
 
     /// Starts a turn with `provider`, converting the history if another
@@ -106,6 +210,9 @@ impl Chat {
         c.native.push(assistant);
         c.plain.push(json!({ "role": "user", "content": user_text }));
         c.plain.push(json!({ "role": "assistant", "content": answer }));
+        if let Some(file) = &self.file {
+            save_plain(file, &c.plain);
+        }
     }
 }
 
@@ -117,10 +224,13 @@ impl Chat {
 pub fn system_prompt(web_search: bool) -> String {
     let base = system_prompt_for(crate::identity::first_name(), web_search);
     // The chat's Mail switch is on for this turn: how to write a mail plan.
-    if crate::mail::MAIL_TURN.load(std::sync::atomic::Ordering::Relaxed) {
-        return base + crate::mail::plan::INSTRUCTIONS;
-    }
-    base
+    let base = if crate::mail::MAIL_TURN.load(std::sync::atomic::Ordering::Relaxed) {
+        base + crate::mail::plan::INSTRUCTIONS
+    } else {
+        base
+    };
+    // The user's own standing instructions come last, read fresh every turn.
+    with_instructions(base, custom_instructions())
 }
 
 fn system_prompt_for(first_name: Option<&str>, web_search: bool) -> String {
@@ -353,6 +463,60 @@ mod tests {
         assert!(p.starts_with("You are Mochi, a personal AI assistant living at the top of the user's screen."));
         assert!(!p.contains("web search"));
         assert!(p.contains("no web access"));
+    }
+
+    #[test]
+    fn history_survives_a_restart_and_a_reset_forgets_it() {
+        let dir = std::env::temp_dir().join(format!("coucou-chat-test-{}", std::process::id()));
+        let file = dir.join("chat-history.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        let chat = Chat { file: Some(file.clone()), ..Default::default() };
+        let t = chat.begin("anthropic");
+        chat.commit(&t, json!({"role":"user","content":"Oi"}), json!({"role":"assistant","content":"Olá"}), "Oi", "Olá");
+        let reloaded = load_plain(&file);
+        assert_eq!(reloaded.len(), 2);
+        assert_eq!(reloaded[0], json!({"role":"user","content":"Oi"}));
+        assert_eq!(reloaded[1], json!({"role":"assistant","content":"Olá"}));
+        chat.reset();
+        assert!(load_plain(&file).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_damaged_history_file_is_ignored_whole() {
+        let dir = std::env::temp_dir().join(format!("coucou-chat-bad-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("h.json");
+        std::fs::write(&file, r#"[{"role":"assistant","content":"x"}]"#).unwrap();
+        assert!(load_plain(&file).is_empty());
+        std::fs::write(&file, "not json").unwrap();
+        assert!(load_plain(&file).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saved_history_is_capped_and_starts_with_the_user() {
+        let dir = std::env::temp_dir().join(format!("coucou-chat-cap-{}", std::process::id()));
+        let file = dir.join("h.json");
+        let mut plain = Vec::new();
+        for i in 0..150 {
+            plain.push(json!({"role":"user","content":format!("q{i}")}));
+            plain.push(json!({"role":"assistant","content":format!("a{i}")}));
+        }
+        save_plain(&file, &plain);
+        let back = load_plain(&file);
+        assert_eq!(back.len(), KEEP_MESSAGES);
+        assert_eq!(back[0]["role"], "user");
+        assert_eq!(back[back.len() - 1]["content"], "a149");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn standing_instructions_go_last_and_empty_ones_change_nothing() {
+        assert_eq!(with_instructions("base".into(), None), "base");
+        let p = with_instructions("base".into(), Some("Seja breve.".into()));
+        assert!(p.starts_with("base"));
+        assert!(p.ends_with("Seja breve."));
     }
 
     #[test]

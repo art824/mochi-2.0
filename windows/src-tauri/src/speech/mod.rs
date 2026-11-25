@@ -281,8 +281,66 @@ fn threads() -> i32 {
     std::thread::available_parallelism().map(|n| n.get().clamp(1, 4) as i32).unwrap_or(2)
 }
 
-/// The loaded recognizer, loading it on first use (about 2 s).
+/// When the model was last asked for. The model is ~650 MB. Unloading it after a quiet while (23/11)
+/// made the first dictation after a pause wait ~7 s loading it — "unusable" (Arthur, 24/11) — so it
+/// stays loaded; only its memory is handed back to Windows while it is idle (`start_idle_watch`).
+fn last_used() -> &'static Mutex<Instant> {
+    static L: OnceLock<Mutex<Instant>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(Instant::now()))
+}
+
+/// Says the model is being used now (a key down, a dictation, a live note).
+pub fn touch() {
+    *last_used().lock().unwrap() = Instant::now();
+}
+
+/// How long the model sits unused before its memory is handed back to Windows.
+const TRIM_AFTER: Duration = Duration::from_secs(90);
+
+/// Hands the process's physical memory back to Windows (the model stays loaded). The pages go to
+/// the standby list: reclaimed at once if something else needs the RAM, and read back in a moment
+/// when the next dictation touches them — so Task Manager shows tens of MB instead of ~750, and a
+/// dictation after a pause starts at once instead of loading the model again.
+#[cfg(windows)]
+fn trim_working_set() {
+    use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+    unsafe {
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
+#[cfg(not(windows))]
+fn trim_working_set() {}
+
+/// One thread, started once: after `TRIM_AFTER` without the model being asked for, gives its
+/// physical memory back to Windows — once per quiet stretch. The model stays loaded.
+pub fn start_idle_watch(_app: &AppHandle) {
+    // Turned off on 25/11 (Arthur: dictation stopped working; "always on, even if it takes RAM").
+    // The model stays loaded and untouched, as in the original. Set to true to bring the trim back.
+    const TRIM_ENABLED: bool = false;
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !TRIM_ENABLED || STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("speech-idle".into()).spawn(move || {
+        let mut trimmed_for: Option<Instant> = None;
+        loop {
+            std::thread::sleep(Duration::from_secs(15));
+            let loaded = recognizer_slot().lock().unwrap().is_some();
+            let used = *last_used().lock().unwrap();
+            if !loaded || used.elapsed() < TRIM_AFTER || trimmed_for == Some(used) {
+                continue;
+            }
+            trim_working_set();
+            trimmed_for = Some(used);
+            crate::log::line("Parakeet: memory handed back to Windows while idle (the model stays loaded)");
+        }
+    });
+}
+
+/// The loaded recognizer, loading it on first use (about 6 s).
 pub fn recognizer() -> Option<Arc<OfflineRecognizer>> {
+    touch();
     if let Some(r) = recognizer_slot().lock().unwrap().clone() {
         return Some(r);
     }

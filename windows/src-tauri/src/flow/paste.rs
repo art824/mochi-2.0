@@ -32,8 +32,19 @@ fn set_text(clipboard: &mut Clipboard, text: &str) -> Result<(), arboard::Error>
     }
 }
 
-/// Copies `text` and leaves it there (the dictation could not be pasted).
+/// When the last paste happened: its clipboard restore (700 ms later) would undo
+/// a copy asked for in between, so `copy` waits that moment out.
+static LAST_PASTE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// Copies `text` and leaves it there (the dictation could not be pasted, or
+/// the island's Copy button was pressed).
 pub fn copy(text: &str) -> bool {
+    let wait = (*LAST_PASTE.lock().unwrap()).map(|t| Duration::from_millis(850).saturating_sub(t.elapsed()));
+    if let Some(wait) = wait {
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
+        }
+    }
     with_clipboard(|c| set_text(c, text).is_ok()).unwrap_or(false)
 }
 
@@ -58,6 +69,7 @@ pub fn paste(text: &str, shift: bool) -> Outcome {
         crate::log::line(format!("flow: paste keystroke failed: {err}"));
         return Outcome::Copied;
     }
+    *LAST_PASTE.lock().unwrap() = Some(std::time::Instant::now());
     let ours = text.to_string();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(700));

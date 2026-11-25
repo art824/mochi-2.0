@@ -1,0 +1,292 @@
+//! "Media": whatever is playing on this computer that is NOT Spotify (Arthur, 24/11/2026).
+//!
+//! A YouTube tab, a video player, any app that shows up in the Windows media overlay (the one the
+//! media keys open). Spotify has its own pill and card, so its session is skipped here: with
+//! Spotify playing there is only the Spotify Mochi. Only what the overlay already shows is read —
+//! title, artist, cover, position — and nothing is sent anywhere. Reading runs only while the
+//! "Media" pill is on in Settings. Windows only.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex};
+
+use serde::Serialize;
+
+pub const PILL_ID: &str = "integration_media";
+
+static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// What the page gets as "media-state".
+#[derive(Clone, Serialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaState {
+    /// A session other than Spotify's is there and has a title.
+    pub present: bool,
+    /// The app's name as a person says it ("Chrome", "VLC").
+    pub app: String,
+    pub title: String,
+    pub artist: String,
+    pub playing: bool,
+    /// Seconds into the track when `at_ms` was true; the page runs it on while playing.
+    pub position: f64,
+    pub duration: f64,
+    pub at_ms: f64,
+    /// The cover as a data URL; sent once per track (None when the page already has it).
+    pub art: Option<String>,
+    pub art_key: String,
+}
+
+static STATE: LazyLock<Mutex<MediaState>> = LazyLock::new(|| Mutex::new(MediaState::default()));
+
+pub fn sync(active_integrations: &[String]) {
+    ACTIVE.store(active_integrations.iter().any(|x| x == PILL_ID), Ordering::Relaxed);
+}
+
+/// The last state, for a page that starts after the first event.
+#[tauri::command]
+pub fn media_state() -> MediaState {
+    STATE.lock().unwrap().clone()
+}
+
+/// The card's buttons: "playpause", "next", "prev" and "seek" (value = seconds).
+#[tauri::command]
+pub fn media_control(action: String, value: Option<f64>) -> bool {
+    #[cfg(windows)]
+    {
+        win::control(&action, value)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (action, value);
+        false
+    }
+}
+
+#[cfg(windows)]
+pub fn start(app: &tauri::AppHandle, active_integrations: &[String]) {
+    sync(active_integrations);
+    let app = app.clone();
+    let _ = std::thread::Builder::new().name("coucou-media".into()).spawn(move || win::run(app));
+}
+
+#[cfg(not(windows))]
+pub fn start(_app: &tauri::AppHandle, active_integrations: &[String]) {
+    sync(active_integrations);
+}
+
+fn now_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
+}
+
+/// "chrome.exe" → "Chrome", a Store id → its last piece.
+fn friendly(id: &str) -> String {
+    let lower = id.to_lowercase();
+    for (key, name) in [
+        ("chrome", "Chrome"),
+        ("msedge", "Edge"),
+        ("firefox", "Firefox"),
+        ("brave", "Brave"),
+        ("opera", "Opera"),
+        ("vlc", "VLC"),
+        ("zunevideo", "Movies & TV"),
+        ("zunemusic", "Media Player"),
+        ("mediaplayer", "Media Player"),
+        ("netflix", "Netflix"),
+        ("discord", "Discord"),
+    ] {
+        if lower.contains(key) {
+            return name.to_string();
+        }
+    }
+    let last = id.rsplit(['\\', '!', '/']).next().unwrap_or(id);
+    last.trim_end_matches(".exe").trim_end_matches(".EXE").to_string()
+}
+
+#[cfg(windows)]
+mod win {
+    use std::time::Duration;
+
+    use tauri::{AppHandle, Emitter};
+    use windows::Media::Control::{
+        GlobalSystemMediaTransportControlsSession as Session,
+        GlobalSystemMediaTransportControlsSessionManager as Manager,
+        GlobalSystemMediaTransportControlsSessionMediaProperties as MediaProperties,
+        GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
+    };
+    use windows::Storage::Streams::DataReader;
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+
+    use super::{friendly, now_ms, MediaState, ACTIVE, STATE};
+    use std::sync::atomic::Ordering;
+
+    const EVENT: &str = "media-state";
+    const ART_LIMIT: u64 = 3 * 1024 * 1024;
+
+    fn com() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+    }
+
+    /// The session to show: any that is not Spotify's, a playing one first.
+    fn pick(manager: &Manager) -> Option<Session> {
+        let sessions = manager.GetSessions().ok()?;
+        let mut best: Option<(u8, Session)> = None;
+        for i in 0..sessions.Size().ok()? {
+            let Ok(s) = sessions.GetAt(i) else { continue };
+            let id = s.SourceAppUserModelId().map(|x| x.to_string_lossy()).unwrap_or_default();
+            if crate::spotify::is_spotify_app(&id) {
+                continue;
+            }
+            let playing = s
+                .GetPlaybackInfo()
+                .and_then(|p| p.PlaybackStatus())
+                .is_ok_and(|st| st == Status::Playing);
+            let rank = if playing { 2 } else { 1 };
+            if best.as_ref().map_or(true, |(r, _)| rank > *r) {
+                best = Some((rank, s));
+            }
+        }
+        best.map(|(_, s)| s)
+    }
+
+    fn thumbnail(props: &MediaProperties) -> Option<Vec<u8>> {
+        let stream = props.Thumbnail().ok()?.OpenReadAsync().ok()?.get().ok()?;
+        let size = stream.Size().ok()?;
+        if size == 0 || size > ART_LIMIT {
+            return None;
+        }
+        let reader = DataReader::CreateDataReader(&stream).ok()?;
+        let loaded = reader.LoadAsync(size as u32).ok()?.get().ok()?;
+        let mut bytes = vec![0u8; loaded as usize];
+        reader.ReadBytes(&mut bytes).ok()?;
+        Some(bytes)
+    }
+
+    /// The session as it is now, without the cover.
+    fn read(session: &Session) -> Option<(MediaState, MediaProperties)> {
+        let props = session.TryGetMediaPropertiesAsync().ok()?.get().ok()?;
+        let title = props.Title().ok()?.to_string_lossy();
+        if title.trim().is_empty() {
+            return None;
+        }
+        let artist = props.Artist().map(|a| a.to_string_lossy()).unwrap_or_default();
+        let timeline = session.GetTimelineProperties().ok()?;
+        let start = timeline.StartTime().ok()?.Duration;
+        let duration = crate::spotify::ticks_to_secs(timeline.EndTime().ok()?.Duration - start);
+        let position = crate::spotify::ticks_to_secs(timeline.Position().ok()?.Duration - start);
+        let playing = session
+            .GetPlaybackInfo()
+            .and_then(|p| p.PlaybackStatus())
+            .is_ok_and(|st| st == Status::Playing);
+        let app = friendly(&session.SourceAppUserModelId().map(|x| x.to_string_lossy()).unwrap_or_default());
+        Some((
+            MediaState {
+                present: true,
+                app,
+                art_key: format!("{title}\u{1f}{artist}"),
+                title: title.trim().chars().take(200).collect(),
+                artist: artist.trim().chars().take(200).collect(),
+                playing,
+                position,
+                duration,
+                at_ms: now_ms(),
+                art: None,
+            },
+            props,
+        ))
+    }
+
+    pub fn run(app: AppHandle) {
+        com();
+        let mut manager: Option<Manager> = None;
+        let mut last = MediaState::default();
+        let mut art: Option<String> = None;
+        let mut art_key = String::new();
+        let mut art_tries = 0u32;
+        loop {
+            std::thread::sleep(Duration::from_millis(1000));
+            if !ACTIVE.load(Ordering::Relaxed) {
+                if last.present {
+                    last = MediaState::default();
+                    *STATE.lock().unwrap() = last.clone();
+                    let _ = app.emit_to(crate::island::WINDOW_LABEL, EVENT, last.clone());
+                }
+                art = None;
+                art_key.clear();
+                std::thread::sleep(Duration::from_millis(1000));
+                continue;
+            }
+            if manager.is_none() {
+                manager = Manager::RequestAsync().ok().and_then(|op| op.get().ok());
+            }
+            let Some(m) = &manager else { continue };
+            let read_now = pick(m).and_then(|s| read(&s));
+            let mut next = MediaState::default();
+            let mut art_changed = false;
+            if let Some((state, props)) = read_now {
+                next = state;
+                if next.art_key != art_key {
+                    art_key = next.art_key.clone();
+                    art = None;
+                    art_tries = 0;
+                    art_changed = true; // the old cover goes away at once
+                }
+                // A cover sometimes arrives a moment after the title: try again for a few seconds.
+                if art.is_none() && art_tries < 8 {
+                    art_tries += 1;
+                    if let Some(data) = thumbnail(&props).as_deref().and_then(crate::spotify::data_url) {
+                        art = Some(data);
+                        art_changed = true;
+                    }
+                }
+                next.art = art.clone();
+            } else {
+                art = None;
+                art_key.clear();
+            }
+
+            let predicted = if last.playing { last.position + (next.at_ms - last.at_ms) / 1000.0 } else { last.position };
+            let moved = (next.position - predicted).abs() > 1.5;
+            let changed = next.present != last.present
+                || next.title != last.title
+                || next.artist != last.artist
+                || next.app != last.app
+                || next.playing != last.playing
+                || (next.duration - last.duration).abs() > 0.5
+                || art_changed
+                || (next.present && moved);
+            if !changed {
+                continue;
+            }
+            *STATE.lock().unwrap() = next.clone();
+            // The cover travels once per track: the page keeps it while the key is the same.
+            let mut event = next.clone();
+            if !art_changed {
+                event.art = None;
+            }
+            let _ = app.emit_to(crate::island::WINDOW_LABEL, EVENT, event);
+            last = next;
+        }
+    }
+
+    pub fn control(action: &str, value: Option<f64>) -> bool {
+        com();
+        let Ok(manager) = Manager::RequestAsync().and_then(|op| op.get()) else { return false };
+        let Some(session) = pick(&manager) else { return false };
+        let result = match action {
+            "playpause" => session.TryTogglePlayPauseAsync(),
+            "next" => session.TrySkipNextAsync(),
+            "prev" => session.TrySkipPreviousAsync(),
+            "seek" => {
+                let Some(secs) = value else { return false };
+                let start = session.GetTimelineProperties().and_then(|t| t.StartTime()).map(|d| d.Duration).unwrap_or(0);
+                session.TryChangePlaybackPositionAsync(start + (secs.max(0.0) * 10_000_000.0) as i64)
+            }
+            _ => return false,
+        };
+        result.and_then(|op| op.get()).unwrap_or(false)
+    }
+}

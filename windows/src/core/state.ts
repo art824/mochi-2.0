@@ -39,7 +39,33 @@ export interface AgentTask {
   sessionId?: string | null;
   /** Claude's final message after Stop, one line; cleared when a new turn starts. */
   finalLine?: string | null;
+  /** The session that just finished (its folder name): the "finished" card names it. */
+  finishedName?: string | null;
 }
+
+/**
+ * One Claude session inside an agent pill (the Desktop app can run several at
+ * once, and used to blur them into one pill). Kept apart from AgentTask so a
+ * pill that comes and goes does not lose track of them.
+ */
+export interface SessionInfo {
+  id: string;
+  /** Folder name (the hooks carry no chat title); "name 2" when two share it. */
+  name: string;
+  cwd: string;
+  state: BotStateName;
+  steps: string[];
+  stepIndex: number;
+  stepSeq?: number;
+  finalLine?: string | null;
+  startedAt: number;
+  lastActive: number;
+}
+
+/** A session in one of these is waiting on Claude, or on you. */
+export const BUSY_STATES: ReadonlySet<BotStateName> = new Set([
+  "thinking", "working", "question", "approval", "ratelimit",
+] as BotStateName[]);
 
 export interface ApprovalInfo {
   requestId: string;
@@ -50,6 +76,8 @@ export interface ApprovalInfo {
   command: string;
   /** Set when Claude Code is asking a question rather than for a permission. */
   questions?: AskedQuestion[];
+  /** When the card first came up (epoch ms): a refusal is told apart from "still thinking". */
+  shownAt?: number;
 }
 
 /** One question of an AskUserQuestion call. */
@@ -229,6 +257,29 @@ class AppState {
   mouseInIsland = { x: 0, y: 0 };
 
   isPinned = false;
+  /**
+   * Subtle mode (header moon button): notices — a session finished, an error, a
+   * question, an approval — only bring up the compact island (Mochi in the
+   * state's colour, with its symbol) instead of opening the big one. Kept
+   * between runs; the page works without storage.
+   */
+  subtle = (() => {
+    try {
+      return localStorage.getItem("coucou.subtle") === "1";
+    } catch {
+      return false;
+    }
+  })();
+  setSubtle(on: boolean) {
+    this.subtle = on;
+    try {
+      localStorage.setItem("coucou.subtle", on ? "1" : "0");
+    } catch {
+      /* no storage: it just won't be remembered */
+    }
+  }
+  /** A call is being recorded by the Notetaker (the header button lights up). */
+  noteRecording = false;
   paused = false;
 
   uploadProgress = 0;
@@ -326,6 +377,7 @@ class AppState {
    * the pill that was there is remembered (HookServer.focusBeforeApproval).
    */
   beginApproval(info: ApprovalInfo) {
+    info.shownAt ??= Date.now();
     this.pendingApproval = info;
     this.isPinned = true;
     if (this.focusBeforeApproval == null) this.focusBeforeApproval = this.focusId;
@@ -341,14 +393,14 @@ class AppState {
     if (!req) return;
     this.pendingApproval = null;
     this.isPinned = false;
-    this.updateTask(req.pillId, "working");
+    this.updateTask(req.pillId, "working", req.sessionId);
     this.setPillBadge(req.pillId, null);
 
     // If another request is waiting in line, promote it next
     const next = this.approvalQueue.shift();
     if (next) {
       this.beginApproval(next);
-      this.updateTask(next.pillId, next.questions ? "question" : "approval");
+      this.updateTask(next.pillId, next.questions ? "question" : "approval", next.sessionId);
       this.notify();
       return;
     }
@@ -361,14 +413,89 @@ class AppState {
     this.notify();
   }
 
-  updateTask(id: string, state: BotStateName) {
+  /** Sessions of each agent pill, oldest first. */
+  readonly sessions = new Map<string, SessionInfo[]>();
+  /** The session the hook being handled belongs to (set by the hook handler). */
+  hookSession = "";
+
+  /** Sessions still worth listing: a quiet one goes after 15 minutes. */
+  sessionsOf(pillId: string): SessionInfo[] {
+    const list = this.sessions.get(pillId);
+    if (!list) return [];
+    const now = Date.now();
+    const keep = list.filter((s) => BUSY_STATES.has(s.state) || now - s.lastActive < 15 * 60_000);
+    if (keep.length !== list.length) {
+      if (keep.length) this.sessions.set(pillId, keep);
+      else this.sessions.delete(pillId);
+    }
+    return keep;
+  }
+
+  /** Makes sure the session exists and notes that it just did something. */
+  touchSession(pillId: string, sessionId: string, name: string, cwd: string): SessionInfo | null {
+    if (!sessionId) return null;
+    let list = this.sessions.get(pillId);
+    if (!list) this.sessions.set(pillId, (list = []));
+    let s = list.find((x) => x.id === sessionId);
+    if (!s) {
+      let label = name || "Session";
+      let n = 2;
+      while (list.some((x) => x.name === label)) label = `${name || "Session"} ${n++}`;
+      s = {
+        id: sessionId, name: label, cwd, state: "idle", steps: [], stepIndex: 0,
+        startedAt: Date.now(), lastActive: Date.now(),
+      };
+      list.push(s);
+    }
+    s.lastActive = Date.now();
+    if (cwd) s.cwd = cwd;
+    return s;
+  }
+
+  endSession(pillId: string, sessionId: string) {
+    const list = this.sessions.get(pillId);
+    if (!list) return;
+    const keep = list.filter((s) => s.id !== sessionId);
+    if (keep.length) this.sessions.set(pillId, keep);
+    else this.sessions.delete(pillId);
+    this.notify();
+  }
+
+  /** Another session of this pill is still on a turn. */
+  hasBusySession(pillId: string, except = ""): boolean {
+    return this.sessionsOf(pillId).some((s) => s.id !== except && BUSY_STATES.has(s.state));
+  }
+
+  clearSessions(pillId: string) {
+    if (this.sessions.delete(pillId)) this.notify();
+  }
+
+  private sessionOf(pillId: string, sessionId = this.hookSession): SessionInfo | null {
+    return this.sessions.get(pillId)?.find((x) => x.id === sessionId) ?? null;
+  }
+
+  updateTask(id: string, state: BotStateName, sessionId?: string) {
     const t = this.tasks.find((x) => x.id === id);
+    const s = this.sessionOf(id, sessionId);
+    if (s) {
+      s.state = state;
+      s.lastActive = Date.now();
+    }
     if (!t) return;
     t.state = state;
     this.notify();
   }
 
-  appendStep(id: string, step: string) {
+  appendStep(id: string, step: string, sessionId?: string) {
+    const s = this.sessionOf(id, sessionId);
+    if (s) {
+      const newestS = s.stepSeq ?? s.steps.length - 1;
+      s.steps.push(step);
+      if (s.steps.length > 20) s.steps.shift();
+      s.stepIndex = s.steps.length - 1;
+      s.stepSeq = newestS + 1;
+      s.lastActive = Date.now();
+    }
     const t = this.tasks.find((x) => x.id === id);
     if (!t) return;
     const newest = t.stepSeq ?? t.steps.length - 1;

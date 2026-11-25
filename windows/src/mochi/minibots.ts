@@ -87,8 +87,14 @@ export function tickMiniBots(dt: number) {
       mb.canvas.width = px;
       mb.canvas.height = px;
     }
+    // Cleared in device pixels, the whole bitmap: on a fractional scale (125, 150,
+    // 175 %) the bitmap is a fraction of a pixel bigger than the CSS size, and
+    // clearing only "cssSize" left a strip at the right and bottom edges that
+    // kept whatever was ever drawn there — a thin square around the mochi
+    // (Arthur, 23/11).
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, mb.canvas.width, mb.canvas.height);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, mb.cssSize, mb.cssSize);
     ctx.save();
     mb.engine.applyDance(ctx, mb.cssSize, mb.cssSize);
     mb.engine.draw(ctx, mb.cssSize, mb.cssSize);

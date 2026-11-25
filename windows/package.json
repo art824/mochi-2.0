@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "check:colors": "node scripts/check-pill-colors.mjs",
+    "build": "node scripts/check-pill-colors.mjs && tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "node --import ./tests/setup.mjs --test \"tests/**/*.test.mjs\"",
     "icons": "node scripts/gen-icons.mjs",

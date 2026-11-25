@@ -23,12 +23,31 @@ export class IslandStateMachine {
   }
   /** petit → hidden delay, seconds. */
   petitToHiddenDelay = 60;
+  /**
+   * Strict hiding: the island is out of sight unless asked for. It wakes only
+   * after the pointer has rested on the top strip for `revealHoverDelay`, and
+   * anything that shows it (a notice, a card folding, the greeting) folds away
+   * again on its own.
+   */
+  strictHide = false;
+  /** Seconds the pointer must rest on the folded strip before the island shows. */
+  revealHoverDelay = 1.4;
+  /** In strict mode: seconds the compact island stays once the pointer is off it. */
+  strictPetitDelay = 2; // was 5: Arthur wanted it "very smaller" (23/11)
+  /** In strict mode: seconds a notice stays on screen when nobody hovers it. */
+  strictNoticeDelay = 8;
   /** coucou → petit once the greeting animation ends (no hover). */
   greetAutoCollapseDelay = 0.6;
   /** coucou → petit while the mouse hovers the greeting. */
   greetHoverCollapseDelay = 10;
   /** An alert waiting for an answer stays open, even when the mouse leaves. */
   pinned = false;
+  /**
+   * The dictation keeps the compact island up while it listens, processes and
+   * shows Copy. Its own flag: the alert code sets and clears `pinned` in many
+   * places and must not be able to drop the island in the middle of a dictation.
+   */
+  hold = false;
   /**
    * Hovering opens the island all the way instead of peeking (Settings →
    * General → Open on hover, off by default), as IslandStateMachine.openOnHover.
@@ -56,6 +75,7 @@ export class IslandStateMachine {
   private homeCollapse: number | null = null;
   private greetCollapse: number | null = null;
   private hoverOpen: number | null = null;
+  private hoverReveal: number | null = null;
 
   // ── Inputs ──────────────────────────────────────────────────────────────────
 
@@ -67,6 +87,21 @@ export class IslandStateMachine {
   mouseEntered() {
     switch (this.state) {
       case "hidden":
+        // Strict mode: the pointer has to stay put for a while before the
+        // island shows. Leaving the strip (mouseLeft) cancels it. A card that
+        // waits for an answer is never made to wait.
+        if (this.strictHide && !this.pinned && this.revealHoverDelay > 0) {
+          if (this.hoverReveal == null) {
+            this.hoverReveal = window.setTimeout(() => {
+              this.hoverReveal = null;
+              if (this.state !== "hidden") return;
+              this.cancelTimers();
+              this.transition("petit");
+              if (this.openOnHover && !this.pinned) this.scheduleHoverOpen();
+            }, this.revealHoverDelay * 1000);
+          }
+          break;
+        }
         // The closed island only peeks: a PC has no notch, so the pointer
         // lands on it far more often than on a Mac's, on its way elsewhere.
         this.cancelTimers();
@@ -89,6 +124,7 @@ export class IslandStateMachine {
 
   mouseLeft() {
     this.clear("hoverOpen");
+    this.clear("hoverReveal");
     switch (this.state) {
       case "hidden":
         break;
@@ -112,6 +148,17 @@ export class IslandStateMachine {
     this.transition("home");
   }
 
+  /**
+   * A click on the wake strip while the island is hidden: no waiting for the
+   * hover, it opens right away (Arthur, 23/11).
+   */
+  clickHidden() {
+    if (this.state !== "hidden") return;
+    this.byHover = false;
+    this.cancelTimers();
+    this.transition("home");
+  }
+
   /** Greeting animation finished (T.end). Doesn't override a running hover timer. */
   greetComplete() {
     if (this.state !== "coucou") return;
@@ -123,7 +170,8 @@ export class IslandStateMachine {
     if (this.state !== "hidden") return;
     this.cancelTimers();
     this.transition("petit");
-    this.schedulePetitHide();
+    // A notice: in strict mode it stays a little longer than a mere peek.
+    this.schedulePetitHide(this.strictHide ? this.strictNoticeDelay : undefined);
   }
 
   /**
@@ -144,6 +192,11 @@ export class IslandStateMachine {
     this.transition("home");
   }
 
+  /** Folds the compact island away after `seconds` (unless something pins it). */
+  fold(seconds: number) {
+    if (this.state === "petit" && !this.pinned && !this.hold) this.schedulePetitHide(seconds);
+  }
+
   /// Explicit close (OK button, Escape, an alert being answered).
   forcePetit() {
     this.byHover = false;
@@ -159,15 +212,16 @@ export class IslandStateMachine {
 
   // ── Timers ──────────────────────────────────────────────────────────────────
 
-  private schedulePetitHide() {
+  private schedulePetitHide(seconds?: number) {
     this.clear("petitHide");
     // A card folded away while it waits for an answer keeps the compact island
     // on screen, so it can be reopened (isHeldOpen on macOS).
-    if (this.pinned) return;
+    if (this.pinned || this.hold) return;
+    const delay = seconds ?? (this.strictHide ? this.strictPetitDelay : this.petitToHiddenDelay);
     this.petitHide = window.setTimeout(() => {
       this.petitHide = null;
-      if (this.state === "petit" && !this.pinned) this.transition("hidden");
-    }, this.petitToHiddenDelay * 1000);
+      if (this.state === "petit" && !this.pinned && !this.hold) this.transition("hidden");
+    }, delay * 1000);
   }
 
   private scheduleHomeCollapse() {
@@ -205,7 +259,7 @@ export class IslandStateMachine {
     }, delay * 1000);
   }
 
-  private clear(which: "petitHide" | "homeCollapse" | "greetCollapse" | "hoverOpen") {
+  private clear(which: "petitHide" | "homeCollapse" | "greetCollapse" | "hoverOpen" | "hoverReveal") {
     const id = this[which];
     if (id != null) window.clearTimeout(id);
     this[which] = null;
@@ -213,6 +267,7 @@ export class IslandStateMachine {
   }
 
   cancelTimers() {
+    this.clear("hoverReveal");
     this.clear("hoverOpen");
     this.clear("petitHide");
     this.clear("homeCollapse");

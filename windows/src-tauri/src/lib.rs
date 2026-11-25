@@ -25,6 +25,7 @@ mod launch;
 mod local_chat;
 mod log;
 mod mail;
+mod media;
 mod net;
 mod notes;
 mod openai_compat;
@@ -47,6 +48,7 @@ mod voice;
 #[cfg(windows)]
 mod webview_drop;
 mod webview_memory;
+mod toast_wa;
 mod whatsapp;
 
 use std::process::Command;
@@ -143,6 +145,8 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     integrations::settings_saved(&app, &settings.active_integrations);
     spotify::sync(&app, &settings.active_integrations);
     whatsapp::sync(&settings.active_integrations);
+    toast_wa::sync(&settings.active_integrations);
+    media::sync(&settings.active_integrations);
     if shortcuts_changed {
         shortcuts::apply(&app, &settings.shortcuts);
     }
@@ -604,6 +608,13 @@ fn chat_reset(chat: State<Chat>) {
     chat.reset();
 }
 
+/// The turns the chat remembers (saved from earlier runs too), so the window
+/// can show them again after a restart.
+#[tauri::command]
+fn chat_history(chat: State<Chat>) -> Vec<serde_json::Value> {
+    chat.plain_turns()
+}
+
 /// Copies a dropped file into the inbox and reports its name back.
 #[tauri::command]
 fn ingest_file(path: String) -> Result<DroppedFile, String> {
@@ -893,7 +904,7 @@ pub fn run() {
             gate: gate.clone(),
         })
         .manage(Pending::default())
-        .manage(Chat::default())
+        .manage(Chat::persistent())
         .manage(shortcuts::Registry::default())
         .manage(recap::load())
         .invoke_handler(tauri::generate_handler![
@@ -956,6 +967,7 @@ pub fn run() {
             local_connect,
             local_set_key,
             chat_reset,
+            chat_history,
             ingest_file,
             secret_present,
             claude_ready,
@@ -1025,6 +1037,10 @@ pub fn run() {
             spotify::spotify_control,
             spotify::spotify_open,
             spotify::spotify_installed,
+            media::media_state,
+            media::media_control,
+            toast_wa::toast_scope_get,
+            toast_wa::toast_scope_set,
             whatsapp::whatsapp_island,
             whatsapp::whatsapp_open,
             whatsapp::whatsapp_close,
@@ -1038,6 +1054,7 @@ pub fn run() {
             whatsapp::whatsapp_test,
             whatsapp::whatsapp_install,
             flow::flow_status,
+            flow::flow_copy_last,
             flow::flow_set_prefs,
             flow::flow_history,
             flow::flow_delete,
@@ -1126,6 +1143,10 @@ pub fn run() {
             spotify::sync(&handle, &loaded.active_integrations);
             // WhatsApp (experimental): nothing runs unless it is turned on and its pill is active.
             whatsapp::start(&handle, &loaded.active_integrations);
+            toast_wa::start(&handle, &loaded.active_integrations);
+            media::start(&handle, &loaded.active_integrations);
+            // The voice model (~650 MB) is let go after a quiet while.
+            speech::start_idle_watch(&handle);
             shortcuts::apply(&handle, &loaded.shortcuts);
             // New versions: nothing goes to GitHub until the user agrees (update.rs).
             update::start(handle.clone());

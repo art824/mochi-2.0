@@ -20,7 +20,7 @@ pub const PANEL_H: f64 = 320.0;
 /// Logical size of the invisible strip that wakes the island when it is hidden
 /// and the closed island is set to show nothing.
 pub const STRIP_W: f64 = 240.0;
-pub const STRIP_H: f64 = 6.0;
+pub const STRIP_H: f64 = 14.0;
 
 pub const WINDOW_LABEL: &str = "island";
 

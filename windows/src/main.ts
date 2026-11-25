@@ -12,6 +12,8 @@ import { registerShortcutHandlers } from "./island/shortcuts";
 import { registerVoiceHandlers } from "./island/voice";
 import { applySpotify, registerSpotifyHandlers } from "./island/spotify";
 import { registerWhatsAppHandlers } from "./island/whatsapp";
+import { registerNotificationHandlers } from "./island/notifications";
+import { registerMediaHandlers } from "./island/media";
 import { SPOTIFY_ID } from "./core/spotify";
 import { Recap } from "./recap/recap";
 import { Updates } from "./island/update";
@@ -64,6 +66,10 @@ async function main() {
   await onEvent<{ x: number; y: number }>("cursor", ({ x, y }) => island.onCursor(x, y));
   await onEvent<boolean>("pointer-inside", (inside) => island.setPointerInside(inside));
   await onEvent<null>("closed-hover", () => island.wakeFromClosed());
+  // Dictation feedback lives in the island now (the bottom pill never shows).
+  await onEvent<{ phase: string; noteStartedAt?: number | null; announcement?: { text: string } | null }>("pill-state", (s) => island.onDictation(s));
+  await onEvent<number[]>("pill-bands", (b) => island.onDictationBands(b));
+  await onEvent<{ pasted: boolean }>("dictation-done", (d) => island.onDictationDone(d));
 
   /** Pause has to reach Rust too, or the pollers keep calling out. */
   const setPaused = (on: boolean) => {
@@ -165,6 +171,8 @@ async function main() {
   registerVoiceHandlers();
   registerSpotifyHandlers(island);
   registerWhatsAppHandlers(island);
+  registerNotificationHandlers(island);
+  registerMediaHandlers();
   // New versions: Rust offers the card, the island opens it when nothing else waits.
   await Updates.register(island);
   // Rust may have read Spotify before this page listened: ask once.

@@ -24,12 +24,17 @@ import { buildWardrobe } from "./wardrobe";
 import { buildUpdate } from "./update";
 import { buildWhatsNew } from "./whatsnew";
 import { buildLaunch } from "./launch";
+import { buildSessionsCard } from "./sessions";
 import { buildSpotifyCard, buildSpotifyPill, type SpotifyPillHost } from "./spotify";
 import { SPOTIFY_ID } from "../core/spotify";
 import { buildWhatsAppCard } from "./whatsapp";
 import { WHATSAPP_ID } from "../core/whatsapp";
 import { MAIL_ID } from "../core/mail";
 import { buildMailCard } from "./mail";
+import { buildNotifCard } from "./notifications";
+import { NOTIF_ID } from "../core/notifications";
+import { buildMediaCard } from "./media";
+import { MEDIA_ID, Media } from "../core/media";
 import type { Outfit, OutfitSelection } from "../mochi/wardrobe";
 import { language, t, tl, type Msg } from "../i18n/i18n";
 import type { ViewCommand } from "../island/shortcuts";
@@ -38,7 +43,18 @@ export interface ViewActions {
   setView(v: IslandViewName): void;
   /** "Cancel" on a dropped file: forgets it and goes back home. */
   cancelDrop(): void;
+  /** "OK" and the like: folds the island, unless it is pinned (then it only goes back to the usual view). */
   collapse(): void;
+  /** The header ✕: an explicit close, which also lets go of the pin. */
+  close(): void;
+  /** The header pin: keeps the open island from folding away (Ctrl+P). */
+  togglePin(): void;
+  /** The header moon: subtle mode, where notices only show the compact island. */
+  toggleSubtle(): void;
+  /** The header mic: starts a hands-free dictation (no key held). */
+  startHandsFree(): void;
+  /** The header record button: starts or stops recording a call (Notetaker). */
+  toggleRecording(): void;
   /** Folds a waiting card to the compact island without answering it. */
   foldApproval(): void;
   setFocus(id: string): void;
@@ -132,9 +148,13 @@ export function buildHeader(actions: ViewActions): ViewHost {
 
   const gearBtn = h("button", { title: tl("Settings"), onclick: () => go("settings") }, svg(ICONS.gearLine, 18, { stroke: 1.6 }));
   const soundBtn = h("button", { title: tl("Mute"), onclick: () => actions.toggleSound() }, svg(ICONS.speakerLine, 18, { stroke: 1.6 }));
+  const micBtn = h("button", { class: "mic", title: tl("Dictate hands-free"), onclick: () => actions.startHandsFree() }, svg(ICONS.micLine, 18, { stroke: 1.6 }));
+  const recBtn = h("button", { class: "rec", title: tl("Record a call"), onclick: () => actions.toggleRecording() }, svg(ICONS.recordLine, 18, { stroke: 1.6 }));
+  const pinBtn = h("button", { class: "pin", title: tl("Keep open"), onclick: () => actions.togglePin() }, svg(ICONS.pinLine, 18, { stroke: 1.6 }));
+  const subtleBtn = h("button", { class: "subtle", title: tl("Subtle mode"), onclick: () => actions.toggleSubtle() }, svg(ICONS.moonLine, 18, { stroke: 1.6 }));
   // Folds back to the compact island now, without waiting for the timer (the
   // Mac's ✕). A card waiting for an answer keeps the island open: no ✕ then.
-  const closeBtn = h("button", { class: "close", title: tl("Close"), onclick: () => actions.collapse() }, svg(ICONS.xmark, 17));
+  const closeBtn = h("button", { class: "close", title: tl("Close"), onclick: () => actions.close() }, svg(ICONS.xmark, 17));
   // Plan usage pills (off by default): before the gear, Claude first, as on the Mac.
   const claudePill = buildPlanPill(false);
   const codexPill = buildPlanPill(true);
@@ -150,7 +170,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
     "div",
     { id: "header" },
     h("div", { class: "tabs" }, tabHome, tabChat, tabDrop, tabLaunch),
-    h("div", { class: "header-actions" }, planPills, gearBtn, soundBtn, closeBtn),
+    h("div", { class: "header-actions" }, planPills, micBtn, recBtn, subtleBtn, pinBtn, gearBtn, soundBtn, closeBtn),
   );
   const headerActions = el.lastElementChild as HTMLElement;
 
@@ -167,6 +187,12 @@ export function buildHeader(actions: ViewActions): ViewHost {
       gearBtn.append(v === "settings" ? svg(ICONS.gearFill, 18) : svg(ICONS.gearLine, 18, { stroke: 1.6 }));
       clear(soundBtn);
       soundBtn.append(svg(State.settings.soundEnabled ? ICONS.speakerLine : ICONS.speakerSlashLine, 18, { stroke: 1.6 }));
+      recBtn.classList.toggle("on", State.noteRecording);
+      subtleBtn.classList.toggle("on", State.subtle);
+      subtleBtn.setAttribute("aria-pressed", String(State.subtle));
+      pinBtn.classList.toggle("on", State.isPinned);
+      pinBtn.setAttribute("aria-pressed", String(State.isPinned));
+      pinBtn.style.display = State.pendingApproval ? "none" : "";
       closeBtn.style.display = State.pendingApproval ? "none" : "";
       syncPlanPills();
       el.style.opacity = v === "confused" ? "0" : "1";
@@ -222,10 +248,19 @@ function buildOverview(actions: ViewActions): ViewHost {
   // Spotify's card and pill are kept and updated in place: the progress bar
   // runs on, and a slider being dragged must not be rebuilt under the pointer.
   const spotifyCard = buildSpotifyCard();
+  // Claude Desktop's card: one row per session the app has open.
+  const sessionsCard = buildSessionsCard((diffId) => {
+    actions.blip();
+    activeDiffId = diffId;
+    State.notify();
+  });
   let spotifyPill: SpotifyPillHost | null = null;
   // WhatsApp's card too: its reply field keeps the draft and the keyboard while messages arrive.
   // Mail's card too (classic Outlook): the search field keeps its text and the keyboard.
   const mailCard = buildMailCard({ keyboard: (on) => actions.keyboard(on) });
+  // Windows notifications and Media: wide cards like Spotify's, kept and updated in place.
+  const notifCard = buildNotifCard();
+  const mediaCard = buildMediaCard();
   const whatsappCard = buildWhatsAppCard({
     openSettings: () => actions.openSettingsWindow(),
     keyboard: (on) => actions.keyboard(on),
@@ -240,7 +275,7 @@ function buildOverview(actions: ViewActions): ViewHost {
   let pillIds = "";
   let detailOpen = false;
   let lastFocus: string | null = null;
-  let mode: "ticker" | "card" | "plan" | "diff" | "spotify" | "whatsapp" | "mail" | null = null;
+  let mode: "ticker" | "card" | "plan" | "diff" | "spotify" | "sessions" | "whatsapp" | "mail" | "notifs" | "media" | null = null;
   let cardKey = "";
   /** The list row highlighted at the last sync, to scroll only when it moves. */
   let shownSelection: number | null = null;
@@ -296,6 +331,7 @@ function buildOverview(actions: ViewActions): ViewHost {
   return {
     el,
     tick(nowMs: number) {
+      if (mode === "sessions") return sessionsCard.tick(nowMs);
       if (mode !== "ticker") return false;
       ticker.tick(nowMs);
       return ticker.animating;
@@ -366,6 +402,15 @@ function buildOverview(actions: ViewActions): ViewHost {
             open: (path) => void Bridge.openFileInVSCode(path),
           }));
         }
+      } else if (task && task.id === "agent_claude-desktop") {
+        // Every state of the app's pill: sessions listed, or none open.
+        if (mode !== "sessions") {
+          clear(leftBody);
+          leftBody.append(sessionsCard.el);
+          mode = "sessions";
+          cardKey = "";
+        }
+        sessionsCard.sync(task);
       } else if (task && sessionActive) {
         if (mode !== "ticker") {
           clear(leftBody);
@@ -397,6 +442,24 @@ function buildOverview(actions: ViewActions): ViewHost {
           cardKey = "";
         }
         spotifyCard.sync();
+      } else if (task && task.id === NOTIF_ID) {
+        // Its own wide card in every state: the last notifications, or a quiet line.
+        if (mode !== "notifs") {
+          clear(leftBody);
+          leftBody.append(notifCard.el);
+          mode = "notifs";
+          cardKey = "";
+        }
+        notifCard.sync(task);
+      } else if (task && task.id === MEDIA_ID) {
+        // Its own wide card, the twin of Spotify's: now playing, or nothing playing.
+        if (mode !== "media") {
+          clear(leftBody);
+          leftBody.append(mediaCard.el);
+          mode = "media";
+          cardKey = "";
+        }
+        mediaCard.sync();
       } else if (task && task.id === MAIL_ID) {
         if (mode !== "mail") {
           clear(leftBody);
@@ -429,7 +492,13 @@ function buildOverview(actions: ViewActions): ViewHost {
         }
       }
 
-      jump.style.display = detailOpen || mode === "plan" || mode === "diff" ? "none" : "";
+      // Spotify in front: its card takes the left card's whole width and the pills
+      // fold into the slim rail (style.css, ".overview.sp"), animated in one move.
+      // Its art already opens Spotify, so the ↗ button gives way.
+      const wide = mode === "spotify" || mode === "sessions" || mode === "notifs" ||
+        (mode === "media" && Media.state.present);
+      el.classList.toggle("sp", wide);
+      jump.style.display = detailOpen || mode === "plan" || mode === "diff" || wide ? "none" : "";
 
       // Ctrl+↓ Ctrl+↑ walk the open GitHub list (cardItemCount / cardSelection).
       const rows = mode === "card" ? listRows(leftBody) : [];
@@ -442,6 +511,8 @@ function buildOverview(actions: ViewActions): ViewHost {
       const pillKey = others.map((t) => `${t.id}:${t.color}:${t.pillBadge ?? ""}`).join("|");
       if (pillKey !== pillIds) {
         pillIds = pillKey;
+        // One other pill on its own gets room to be bigger (style.css, ".pills.one").
+        pills.classList.toggle("one", others.length === 1);
         clear(pills);
         spotifyPill = null;
         for (const t of others) {
@@ -475,7 +546,8 @@ export function hasSessionTicker(task: AgentTask): boolean {
 
 function buildPill(task: AgentTask, actions: ViewActions): HTMLElement {
   const label = task.id === "integration_claude" ? pillDefinition(task.id)!.name : task.name;
-  const canvas = createMiniBot(task, 24);
+  // Drawn big and scaled down by CSS (.pills): a lone pill can grow without going soft.
+  const canvas = createMiniBot(task, 48);
   const pill = h(
     "div",
     { class: "pill", onclick: () => actions.setFocus(task.id) },
@@ -497,7 +569,7 @@ function buildPill(task: AgentTask, actions: ViewActions): HTMLElement {
   });
 
   if (task.pillBadge) {
-    const colors = { approval: "#F5A524", finished: "#22C55E", error: "#F4505E" } as const;
+    const colors = { approval: "#F5A524", finished: "#22D3EE", error: "#F4505E" } as const;
     const icons = { approval: ICONS.bang, finished: ICONS.check, error: ICONS.xmark } as const;
     const inner = h("i", { style: `background:${colors[task.pillBadge]}` }, svg(icons[task.pillBadge], 6, { stroke: task.pillBadge === "finished" ? 3 : 0 }));
     const badge = h("div", { class: "pill-badge" }, inner);
@@ -744,9 +816,11 @@ function buildFinished(actions: ViewActions): ViewHost {
     sync() {
       clear(who);
       const agent = State.focusTask?.source === "agent";
-      who.append(agentWho(State.focusTask, agent ? t("finished") : t("Claude Code finished")));
-      // The final message, else the last step that is not a diff (FinishedView).
       const task = State.focusTask;
+      // With several sessions open, say which one finished ("coucou-build  finished").
+      const named = task?.finishedName ? { ...task, name: task.finishedName } : task;
+      who.append(agentWho(named, agent || task?.finishedName ? t("finished") : t("Claude Code finished")));
+      // The final message, else the last step that is not a diff (FinishedView).
       title.textContent = task?.finalLine || (task && lastTextStep(task.steps)) || t("Session finished");
       // Sessions from the Claude desktop app live there, not in a terminal.
       const label = task?.id === "agent_claude-desktop" ? t("Open Claude") : t("Open terminal");

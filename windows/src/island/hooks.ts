@@ -18,6 +18,13 @@ import { N_, t } from "../i18n/i18n";
 import { Launch } from "../core/launch";
 
 const CLAUDE_ID = "integration_claude";
+/**
+ * A session that is merely working (every tool step, every prompt) no longer
+ * pops the compact island out of hiding: Arthur, 23/11, "every little update
+ * brings the notch back, that is bad for me". Alerts still do (a permission,
+ * a question, a turn finished, an error). Set false to get the old behaviour.
+ */
+const QUIET_WORK = true;
 const CURSOR_ID = "agent_cursor";
 
 /** Most requests waiting at once, the one on the card included (Mac ApprovalQueue.maxPending). */
@@ -55,7 +62,7 @@ export function dropPendingCard(island: Island): void {
     // The next request in line takes the card, the way a new one comes up.
     const view = State.pendingApproval.questions ? "question" : "approval";
     Sound.play(view);
-    island.alert(view);
+    island.alert(view, true);
     State.notify();
     return;
   }
@@ -134,6 +141,28 @@ export function settledElsewhere(
   if (name !== "PostToolUse" && name !== "PostToolUseFailure") return false;
   const t = tool ?? "Tool";
   return t === pending.tool && approvalTarget(t, input ?? {}) === pending.command;
+}
+
+/**
+ * The request a tool result settles, if any: among the cards of that session (the
+ * one on screen and those in line), the one that asked about this very call, else
+ * the oldest one for the same tool. A wrong guess is harmless: the relay is
+ * released without a decision and Claude Code asks in its own window, as if
+ * Coucou were closed. A card that stays up for good is not.
+ */
+function settledByToolResult(
+  agentId: string,
+  sessionId: string,
+  tool: string | undefined,
+  input: Record<string, unknown> | undefined,
+): ApprovalInfo | null {
+  const t = tool ?? "Tool";
+  const cards = [State.pendingApproval, ...State.approvalQueue].filter(
+    (x): x is ApprovalInfo => x != null && x.pillId === agentId && x.sessionId === sessionId && x.tool === t,
+  );
+  if (cards.length === 0) return null;
+  const target = approvalTarget(t, input ?? {});
+  return cards.find((x) => x.command === target) ?? cards[0];
 }
 
 /**
@@ -392,14 +421,17 @@ function handleHook(island: Island, payload: HookPayload) {
   const agentId = validAgent ? `agent_${validAgent}` : workspaceId;
   const isExternalAgent = validAgent !== null;
   const sessionId = payload.session_id ?? "";
+  // The pill's own sessions: updateTask / appendStep below also write to this one.
+  State.hookSession = sessionId;
+  if (sessionId && name !== "SessionEnd") State.touchSession(agentId, sessionId, projectName, cwd);
 
   /** Alerts force the island open; work events only reveal the compact island. */
   const surface = (view: Parameters<Island["alert"]>[0], isAlert: boolean) => {
     if (State.mode === "expanded") {
       if (isAlert) island.setView(view);
     } else if (isAlert) {
-      island.alert(view);
-    } else if (State.mode === "hidden") {
+      island.alert(view, true);
+    } else if (State.mode === "hidden" && !QUIET_WORK) {
       island.reveal();
     }
   };
@@ -436,9 +468,44 @@ function handleHook(island: Island, payload: HookPayload) {
   // interrupted, or a new prompt — so the card would be lying. It goes, and the
   // relay is released without a decision. Same rule as the Mac.
   const pending = State.pendingApproval;
+  let settledNow = false;
   if (pending && settledElsewhere(pending, name, agentId, sessionId, payload.tool_name, payload.tool_input)) {
     if (pending.requestId) void Bridge.approvalDecline(pending.requestId);
     dropPendingCard(island);
+    settledNow = true;
+  }
+  // Refused in the Claude app: no event says so (the tool just never runs). What
+  // shows it is the same session starting a DIFFERENT tool while the card is
+  // still up: Claude went on, so nobody is waiting on this answer any more. Not
+  // within 1.5 s of the card (a batch of calls starts together).
+  if (
+    !settledNow && pending && name === "PreToolUse" &&
+    pending.pillId === agentId && pending.sessionId === sessionId &&
+    Date.now() - (pending.shownAt ?? Date.now()) > 1500
+  ) {
+    const tool = payload.tool_name ?? "Tool";
+    const sameCall = tool === pending.tool && approvalTarget(tool, payload.tool_input ?? {}) === pending.command;
+    if (!sameCall) {
+      void Bridge.log(`approval card dropped: the session went on with ${tool}`);
+      if (pending.requestId) void Bridge.approvalDecline(pending.requestId);
+      dropPendingCard(island);
+      settledNow = true;
+    }
+  }
+  // A tool result also settles a request that is not the card on screen, and one
+  // whose command reads a little differently: answering in the Claude app leaves
+  // no other trace than the tool running (the relay is never hung up there).
+  if (!settledNow && (name === "PostToolUse" || name === "PostToolUseFailure")) {
+    const done = settledByToolResult(agentId, sessionId, payload.tool_name, payload.tool_input);
+    if (done) {
+      if (done.requestId) void Bridge.approvalDecline(done.requestId);
+      if (State.pendingApproval === done) dropPendingCard(island);
+      else dropQueued((x) => x === done);
+    } else if (pending) {
+      void Bridge.log(
+        `approval card kept after ${name}: result=${payload.tool_name ?? "?"} card=${pending.tool} sameSession=${pending.sessionId === sessionId}`,
+      );
+    }
   }
 
   // Read after the card above is dropped: its pill may have handed the front
@@ -539,6 +606,9 @@ function handleHook(island: Island, payload: HookPayload) {
         State.appendStep(agentId, finalText);
         const t = State.tasks.find((x) => x.id === agentId);
         if (t) t.finalLine = finalText;
+        const own = State.sessions.get(agentId)?.find((x) => x.id === sessionId);
+        if (own) own.finalLine = finalText;
+        if (t) t.finishedName = own?.name ?? null;
       }
       Sound.play("finish");
       // A card waiting for an answer is never covered by another alert.
@@ -553,7 +623,12 @@ function handleHook(island: Island, payload: HookPayload) {
           // pill you had comes back when it closes (island.ts), as on the Mac. An agent
           // pill about to go hands the front back now.
           if (isExternalAgent || State.mode !== "expanded") restoreAlertFocus();
-          if (isExternalAgent) {
+          if (State.hasBusySession(agentId, sessionId)) {
+            // Another session of this pill is still on a turn: the pill stays up.
+            State.updateTask(agentId, "working", "");
+            State.setPillBadge(agentId, null);
+          } else if (isExternalAgent) {
+            if (!State.isKept(agentId)) State.clearSessions(agentId);
             State.removeTask(agentId);
           } else {
             State.updateTask(agentId, "idle");
@@ -584,8 +659,15 @@ function handleHook(island: Island, payload: HookPayload) {
       // pill recreated within 5.2 s would be removed by it.
       cancelStopTimer(agentId);
       State.clearSessionDiffs(agentId);
+      State.endSession(agentId, sessionId);
       if (isExternalAgent) {
-        State.removeTask(agentId);
+        // The pill goes with its last session, not with the first one that ends.
+        if (State.hasBusySession(agentId)) {
+          State.updateTask(agentId, "working", "");
+        } else {
+          if (!State.isKept(agentId)) State.clearSessions(agentId);
+          State.removeTask(agentId);
+        }
       } else {
         State.updateTask(agentId, "idle");
         clearSession(agentId);
@@ -671,7 +753,7 @@ function handleHook(island: Island, payload: HookPayload) {
       State.updateTask(agentId, view);
       // Any agent's card (Claude Code, Codex, Copilot CLI, Muse Code) comes up
       // the same way: beginApproval brought its pill to the front.
-      island.alert(view);
+      island.alert(view, true);
       break;
     }
 

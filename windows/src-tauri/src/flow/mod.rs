@@ -175,6 +175,8 @@ fn enable(app: &AppHandle, flow: &Arc<Flow>) {
         .ok();
     *running = Some(Running { tx, _listener: listener });
     drop(running);
+    // Loaded now, in the background, so the first dictation is not slowed down; it stays loaded, and
+    // only its physical memory goes back to Windows while idle (speech::start_idle_watch).
     speech::preload();
     pill::update(app, |s| s.enabled = true);
     crate::log::line(format!("flow dictation on ({})", prefs.key.label(&prefs.key_combo)));
@@ -299,8 +301,11 @@ fn run(app: AppHandle, flow: Arc<Flow>, rx: mpsc::Receiver<(KeyEvent, Instant)>)
         }
         // The pill's dots, about 30 times a second while you speak.
         if let Some(l) = &listening {
+            // A long dictation counts as use, so the model is not let go under it.
+            speech::touch();
             let levels = l.take.lock().unwrap().meter.levels;
             let _ = app.emit_to(pill::LABEL, "pill-bands", levels);
+            let _ = app.emit_to(crate::island::WINDOW_LABEL, "pill-bands", levels);
             // The Coucou window's bands breathe with the voice while it is on screen.
             if crate::hub_is_shown() {
                 let _ = app.emit_to(crate::HUB_LABEL, "flow-bands", levels);
@@ -323,6 +328,10 @@ fn begin(app: &AppHandle, flow: &Arc<Flow>) -> Option<Listening> {
         );
         return None;
     }
+    // The microphone opens at once and the model loads while you speak, so it is ready (or nearly)
+    // when you let go. Speaking right away is fine: nothing waits for the model before recording.
+    speech::preload();
+    speech::touch();
     let mic = flow.store.lock().unwrap().prefs.mic.clone();
     let take = Arc::new(Mutex::new(audio::Take::default()));
     let sink_take = take.clone();
@@ -384,7 +393,17 @@ fn finish(app: &AppHandle, flow: &Arc<Flow>, mut l: Listening, busy: Arc<AtomicB
         busy.store(false, Ordering::Relaxed);
         if let Err(err) = result {
             crate::log::line(format!("flow: {err}"));
-            pill::update(&app, |s| s.phase = "idle".into());
+            settle(&app);
+        }
+    });
+}
+
+/// A dictation that finished goes back to idle, unless the user already started
+/// another one: its listening must not be cut short by the old one ending.
+fn settle(app: &AppHandle) {
+    pill::update(app, |s| {
+        if !matches!(s.phase.as_str(), "listening" | "locked") {
+            s.phase = "idle".into();
         }
     });
 }
@@ -394,7 +413,7 @@ fn process(app: &AppHandle, flow: &Arc<Flow>, samples: &[f32], front: Option<&(S
     let transcript = speech::transcribe(samples).ok_or("the voice model is not loaded")?;
     let raw = transcript.text.trim().to_string();
     if raw.is_empty() {
-        pill::update(app, |s| s.phase = "idle".into());
+        settle(app);
         return Ok(());
     }
     let (prepared, style, cleanup, words, key) = {
@@ -421,10 +440,21 @@ fn process(app: &AppHandle, flow: &Arc<Flow>, samples: &[f32], front: Option<&(S
         store.record(&final_text, front.map(|(_, n)| n.as_str()), seconds, store::today(), store::now_ms())
     };
     let _ = app.emit_to(crate::HUB_LABEL, "flow-history", entry);
+    // The island at the top turns its progress bar into a check mark, with a Copy
+    // button: Coucou can't know whether a text box took the Ctrl+V.
+    let _ = app.emit_to(
+        crate::island::WINDOW_LABEL,
+        "dictation-done",
+        serde_json::json!({ "pasted": matches!(outcome, paste::Outcome::Pasted) }),
+    );
     match outcome {
-        paste::Outcome::Pasted => pill::update(app, |s| s.phase = "idle".into()),
+        paste::Outcome::Pasted => settle(app),
         paste::Outcome::Copied => {
-            pill::update(app, |s| s.phase = "copied".into());
+            pill::update(app, |s| {
+                if !matches!(s.phase.as_str(), "listening" | "locked") {
+                    s.phase = "copied".into();
+                }
+            });
             pill::rest_after(app, "copied", 1800);
             pill::announce(
                 app,
@@ -436,11 +466,18 @@ fn process(app: &AppHandle, flow: &Arc<Flow>, samples: &[f32], front: Option<&(S
             );
         }
         paste::Outcome::Failed => {
-            pill::update(app, |s| s.phase = "idle".into());
+            settle(app);
             return Err("the clipboard refused the text".into());
         }
     }
     Ok(())
+}
+
+/// The island's Copy button: the whole last dictation onto the clipboard.
+#[tauri::command]
+pub fn flow_copy_last(flow: State<Arc<Flow>>) -> bool {
+    let Some(text) = flow.store.lock().unwrap().last_text() else { return false };
+    paste::copy(&text)
 }
 
 /// "Paste again": the last dictation, in the app in front now.

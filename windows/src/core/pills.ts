@@ -146,6 +146,14 @@ export const PILL_CATALOG: readonly PillDefinition[] = [
   // linked and turned on in Settings → Integrations → WhatsApp, off until then.
   { id: "integration_whatsapp", name: "WhatsApp", color: "#25D366", category: "service",
     subtitle: N_("Integration"), source: "n8n", support: "yes", connect: none },
+  // Media (src-tauri/src/media.rs): whatever plays on this computer that is not Spotify (a YouTube
+  // tab, a video player). Spotify has its own pill, and its session is skipped here.
+  { id: "integration_media", name: "Media", color: "#FF0000", category: "service",
+    subtitle: N_("Now playing"), source: "n8n", support: "windows", connect: none },
+  // Windows notifications (src-tauri/src/toast_wa.rs): reads the notification center, no third-party
+  // software. Settings → Windows notifications picks WhatsApp only or every app.
+  { id: "integration_notifications", name: "Notifications", color: "#FFFF77", category: "service",
+    subtitle: N_("Windows notifications"), source: "n8n", support: "windows", connect: none },
 ];
 
 /** The always-on pill unless the user picks another workspace tool. */
@@ -182,7 +190,11 @@ export function isHookPill(id: string): boolean {
 
 /** Workspace tools that can be the main pill. */
 export function mainPillChoices(os: HostOs = HOST_OS): PillDefinition[] {
-  return availablePills(os).filter((p) => p.category === "workspace" && p.support !== "soon");
+  // The Claude Desktop app may be the main pill too (Arthur, 23/11): for someone who
+  // only uses the app, the Claude Code pill is one that never has anything to show.
+  return availablePills(os).filter(
+    (p) => (p.category === "workspace" || p.id === "agent_claude-desktop") && p.support !== "soon",
+  );
 }
 
 /** PillDefinition.sessionSubtitle — next to the name in a live session's card. */

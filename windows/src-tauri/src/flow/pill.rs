@@ -19,6 +19,10 @@ use crate::platform::{self, DesktopMode};
 
 pub const LABEL: &str = "pill";
 
+/// False in this custom build: the capsule at the bottom of the screen never
+/// shows. Dictation feedback lives in the island at the top instead.
+const SHOW_BOTTOM_PILL: bool = false;
+
 /// Window size (logical) along the bottom, and on the sides.
 const BOTTOM: (f64, f64) = (520.0, 170.0);
 const SIDE: (f64, f64) = (480.0, 320.0);
@@ -240,7 +244,15 @@ pub fn update(app: &AppHandle, change: impl FnOnce(&mut PillState)) {
         (s.clone(), s.edge != edge_before)
     };
     let _ = app.emit_to(LABEL, "pill-state", &state);
-    let visible = state.enabled || state.note_started_at.is_some() || state.announcement.is_some() || state.voice.is_some() || state.phase != "idle";
+    // Arthur's build: the dictation (listening, thinking, copied...) is drawn by
+    // the island at the top, so the island's page hears the same state.
+    let _ = app.emit_to(crate::island::WINDOW_LABEL, "pill-state", &state);
+    let visible = SHOW_BOTTOM_PILL
+        && (state.enabled
+            || state.note_started_at.is_some()
+            || state.announcement.is_some()
+            || state.voice.is_some()
+            || state.phase != "idle");
     let was = pill.shown.swap(visible, Ordering::Relaxed);
     if visible && (!was || edge_changed) {
         place(app, &pill, &state.edge, state.phase == "listening");

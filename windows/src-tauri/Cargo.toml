@@ -67,6 +67,11 @@ wv2_core = { package = "windows-core", version = "0.62" }
 windows = { version = "0.61", features = [
   # The Spotify pill: the system media controls Spotify publishes to.
   "Foundation",
+  "Foundation_Collections",
+  # WhatsApp through the notification center (toast_wa.rs).
+  "ApplicationModel",
+  "UI_Notifications",
+  "UI_Notifications_Management",
   "Media",
   "Media_Control",
   "Storage_Streams",

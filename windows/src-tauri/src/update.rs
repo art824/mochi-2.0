@@ -451,10 +451,19 @@ fn set_phase(app: &AppHandle, phase: Phase) {
 
 // ── Schedule loop ─────────────────────────────────────────────────────────────
 
+/// True in this custom build: no automatic update checks or offers.
+const AUTO_CHECK_OFF: bool = true;
+
 /// At launch: a first look 30 s in, then every hour (GitHub only every 6 h).
 /// The task sleeps in between: nothing runs while nothing is due.
 pub fn start(app: AppHandle) {
     remove_old_downloads();
+    // Arthur's own build: the automatic look at GitHub (and its "update?" card)
+    // is off, because installing the official release would overwrite his changes.
+    // "Check now" in Settings still works when he asks for it.
+    if AUTO_CHECK_OFF {
+        return;
+    }
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(FIRST_TICK).await;
         let mut launch = true;

@@ -19,6 +19,14 @@ export const ICONS = {
   // The header's line icons, drawn with { stroke }: SF Symbols' gearshape,
   // speaker.wave.2 and speaker.slash, as the Mac header shows them.
   gearLine: "M18.93 9.39 L21.41 10.09 L21.41 13.91 L18.93 14.61 L18.74 15.05 L20.00 17.30 L17.30 20.00 L15.05 18.74 L14.61 18.93 L13.91 21.41 L10.09 21.41 L9.39 18.93 L8.95 18.74 L6.70 20.00 L4.00 17.30 L5.26 15.05 L5.07 14.61 L2.59 13.91 L2.59 10.09 L5.07 9.39 L5.26 8.95 L4.00 6.70 L6.70 4.00 L8.95 5.26 L9.39 5.07 L10.09 2.59 L13.91 2.59 L14.61 5.07 L15.05 5.26 L17.30 4.00 L20.00 6.70 L18.74 8.95Z M15.2 12a3.2 3.2 0 1 1-6.4 0 3.2 3.2 0 0 1 6.4 0z",
+  // record (stroke): the Notetaker, a call
+  recordLine: "M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
+  // mic (stroke): hands-free dictation
+  micLine: "M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3",
+  // pin (stroke): the header toggle that keeps the island open
+  pinLine: "M9 3.5h6M10 3.5v5.2L7.5 12v1.5h9V12L14 8.7V3.5M12 13.5V20.5",
+  // moon (stroke): the header toggle for subtle mode
+  moonLine: "M19.5 14.6A8 8 0 1 1 9.4 4.5a6.4 6.4 0 0 0 10.1 10.1z",
   speakerLine: "M3.8 9.4h3.4l4.6-3.9v13l-4.6-3.9H3.8zM15.4 9.1a4.2 4.2 0 0 1 0 5.8M18.3 6.4a8 8 0 0 1 0 11.2",
   speakerSlashLine: "M3.8 9.4h3.4l4.6-3.9v13l-4.6-3.9H3.8zM15.5 9.5l5 5M20.5 9.5l-5 5",
   // bubble.left.fill: a rounded box with its tail at the bottom left.

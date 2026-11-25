@@ -2,6 +2,7 @@
 // Mirrors IslandRootView.swift + IslandWindowController.swift.
 
 import { Tracked, Spring, clamp } from "../core/anim";
+import { FlowBridge, clock } from "../core/flow";
 import { Bridge, IS_TAURI, onDragDrop, type DragDropPayload } from "../core/bridge";
 import {
   CLOSED_BOT_D, CLOSED_H, closedContent, closedIsland, closedWidth, type ClosedContent,
@@ -55,6 +56,14 @@ const UPLOAD_VIEWS: ReadonlySet<IslandViewName> = new Set(["upload", "uploading"
 /** Seconds between the drop and the moment the progress bar starts filling. */
 const PRE_PROGRESS = USC.T_PROG_START - USC.T_DROP;
 
+/**
+ * Arthur's mode: the island is gone from the screen when unused: no black
+ * shape, nothing. It shows after the pointer rests on the top edge for 10 s
+ * (fsm.revealHoverDelay) or when something notifies, and folds away again by
+ * itself. Set to false to give the "closed island" setting its say again.
+ */
+const ALWAYS_HIDE = true;
+
 const modeOrder = (m: IslandMode) => (m === "hidden" ? 0 : m === "compact" ? 1 : 2);
 
 export class Island {
@@ -92,6 +101,7 @@ export class Island {
   private compactPlanDot!: HTMLElement;
   private compactPlanLabel!: HTMLElement;
   private wakeStrip!: HTMLElement;
+  private hoverLogged = false;
 
   private header!: ViewHost;
   private views!: Map<IslandViewName, ViewHost>;
@@ -147,6 +157,8 @@ export class Island {
 
   /** The next reveal from hidden makes no peek (music starting, as on macOS). */
   private silentReveal = false;
+  /** The pin was put there by a folded card (foldApproval), not by the user. */
+  private foldPinned = false;
 
   /** Drop sequence bookkeeping: last tick played, and whether the ✓ has fired. */
   private uploadTens = 0;
@@ -194,6 +206,8 @@ export class Island {
    */
   foldApproval() {
     if (!State.pendingApproval || State.mode !== "expanded") return;
+    // The hold is the card's, not the user's pin: dropPin lets go of it.
+    this.foldPinned = !State.isPinned;
     State.isPinned = true;
     this.fsm.pinned = true;
     this.fsm.forcePetit();
@@ -205,7 +219,35 @@ export class Island {
     const actions: ViewActions = {
       setView: (v) => this.setView(v),
       cancelDrop: () => this.discardDrop(),
-      collapse: () => this.collapse(),
+      collapse: () => this.dismiss(),
+      close: () => this.collapse(),
+      startHandsFree: () => {
+        Sound.play("blip");
+        // The bars live on the compact island, and an open island shows no indicator:
+        // fold it first, then start once it has settled.
+        this.collapse();
+        window.setTimeout(() => void FlowBridge.pillAction("dictate"), 380);
+      },
+      toggleRecording: () => {
+        Sound.play("blip");
+        if (State.noteRecording) {
+          void FlowBridge.pillAction("stopNote");
+          return;
+        }
+        // The recording shows on the compact island: fold the big one first.
+        this.collapse();
+        window.setTimeout(() => void FlowBridge.pillAction("note"), 380);
+      },
+      togglePin: () => {
+        if (State.pendingApproval) return;
+        Sound.play("blip");
+        this.setPinned(!State.isPinned);
+      },
+      toggleSubtle: () => {
+        Sound.play("blip");
+        State.setSubtle(!State.subtle);
+        State.notify();
+      },
       foldApproval: () => this.foldApproval(),
       setFocus: (id) => {
         State.setFocus(id);
@@ -399,8 +441,242 @@ export class Island {
     this.greetingCanvas.style.width = `${EXPANDED_W}px`;
     this.greetingCanvas.style.height = "150px";
 
+    // Dictation, like a dynamic island: bars that follow the voice, over the
+    // compact island, while the dictation key is held (the bottom pill is gone).
+    this.dictLabel = h("span", { class: "dlabel" });
+    this.dictBars = Array.from({ length: 9 }, () => h("span", { class: "dbar" }));
+    const prog = h("span", { class: "dprog" }, h("span", { class: "dprog-fill" }));
+    const check = h("span", { class: "dcheck", text: "✓" });
+    this.dictCopy = h("button", { class: "dcopy", type: "button", text: "Copy" }) as HTMLButtonElement;
+    // A press on Copy must not open the island: it only copies.
+    this.dictCopy.addEventListener("mousedown", (e) => e.stopPropagation());
+    this.dictCopy.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void this.copyDictation();
+    });
+    // Hands-free (no key held): cancel on the left, paste on the right.
+    const handsFreeBtn = (cls: string, text: string, action: "cancel" | "finish") => {
+      const b = h("button", { class: cls, type: "button", text }) as HTMLButtonElement;
+      b.addEventListener("mousedown", (e) => e.stopPropagation());
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void FlowBridge.pillAction(action);
+      });
+      return b;
+    };
+    this.dictEl = h("div", { id: "island-dictation" },
+      handsFreeBtn("dcancel", "✕", "cancel"), ...this.dictBars, prog, check, this.dictLabel, this.dictCopy,
+      handsFreeBtn("dfinish", "✓", "finish"));
+    this.islandEl.append(this.dictEl);
+
+    // A call being recorded (Notetaker): a red dot, the clock and Stop, on the compact island.
+    this.recClock = h("span", { class: "rclock" });
+    const recStop = h("button", { class: "rstop", type: "button", title: "Stop" }, h("i")) as HTMLButtonElement;
+    recStop.addEventListener("mousedown", (e) => e.stopPropagation());
+    recStop.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void FlowBridge.pillAction("stopNote");
+    });
+    this.recEl = h("div", { id: "island-rec" }, h("span", { class: "rdot" }), this.recClock, recStop);
+    this.islandEl.append(this.recEl);
+
     this.root.append(this.wakeStrip, this.islandEl);
     this.applyGeometry();
+  }
+
+  // ── Dictation (the pill's state, drawn here) ────────────────────────────────
+
+  private dictEl!: HTMLElement;
+  private dictLabel!: HTMLElement;
+  private dictBars: HTMLElement[] = [];
+  private dictCopy!: HTMLButtonElement;
+  private dictActive = false;
+  /** The check mark and the Copy button are up (after the words were pasted). */
+  private dictDone = false;
+  /** The microphone is open right now (listening or hands-free). */
+  private dictListening = false;
+  private dictDoneTimer: number | null = null;
+
+  // ── Recording a call (the Notetaker) ────────────────────────────────────────
+
+  private recEl!: HTMLElement;
+  private recClock!: HTMLElement;
+  private recStartedAt: number | null = null;
+  private recTimer: number | null = null;
+
+  /** `noteStartedAt` from the pill's state: when a call recording began, or null. */
+  private setRec(at: number | null) {
+    if (at === this.recStartedAt) return;
+    const was = this.recStartedAt;
+    this.recStartedAt = at;
+    State.noteRecording = at != null;
+    if (this.recTimer != null) window.clearInterval(this.recTimer);
+    this.recTimer = null;
+    if (at != null) {
+      this.recTimer = window.setInterval(() => this.syncRec(), 1000);
+      // It starts in view for a few seconds; after that it is out of the way, and
+      // comes back with the island when the pointer rests on the top strip.
+      if (was == null && State.mode !== "expanded") {
+        this.silentReveal = true;
+        this.fsm.reveal();
+        this.silentReveal = false;
+      }
+    }
+    this.syncRec();
+    State.notify();
+  }
+
+  private syncRec() {
+    const show = this.recStartedAt != null && State.mode === "compact" && !this.dictActive;
+    this.recEl.style.display = show ? "flex" : "none";
+    if (show) this.recClock.textContent = clock((Date.now() - (this.recStartedAt ?? Date.now())) / 1000);
+  }
+
+  /**
+   * True while the dictation is drawn as a small chip over the header's middle (`.over`) instead of
+   * covering the island: the island is open on a card (pinned, or a notice), which is never covered.
+   */
+  private dictOver = false;
+
+  /**
+   * Shows the dictation. On the compact island it covers it; with a card open (the pinned island) it
+   * is a chip over the header's empty middle — before 24/11/2026 it showed nothing there (Arthur:
+   * "the dictate indicator doesn't show when the island is fixed").
+   */
+  private dictStart(): boolean {
+    if (State.mode === "expanded") {
+      this.kickDictWatchdog();
+      if (!this.dictActive) {
+        this.dictActive = true;
+        this.fsm.hold = true;
+      }
+      this.dictOver = true;
+      this.dictEl.style.display = "flex";
+      this.syncRec();
+      return true;
+    }
+    this.dictOver = false;
+    this.kickDictWatchdog();
+    // Also when something folded the island away meanwhile (Escape, the tray).
+    if (!this.dictActive || State.mode === "hidden") {
+      this.dictActive = true;
+      this.fsm.hold = true;
+      this.silentReveal = true; // no "peek" sound for the dictation
+      this.fsm.reveal();
+      this.silentReveal = false;
+    }
+    this.dictEl.style.display = "flex";
+    this.syncRec();
+    return true;
+  }
+
+  private dictShow(kind: "listen" | "think" | "done" | "note", label = "") {
+    // Follows the island if it opened or closed under a dictation already under way.
+    this.dictOver = State.mode === "expanded";
+    this.dictEl.className = `s-${kind}${this.dictOver ? " over" : ""}`;
+    this.dictLabel.textContent = label;
+    if (kind !== "listen") for (const b of this.dictBars) b.style.height = "4px";
+  }
+
+  /**
+   * Safety net: if Rust never says the dictation is over (a crash, a lost
+   * event), the island is let go after a while instead of staying pinned for good.
+   * Every sign of life (the voice bands come 30 times a second) renews it.
+   */
+  private dictWatchdog: number | null = null;
+  private kickDictWatchdog() {
+    if (this.dictWatchdog != null) window.clearTimeout(this.dictWatchdog);
+    this.dictWatchdog = window.setTimeout(() => {
+      this.dictWatchdog = null;
+      this.dictEnd(0.4);
+    }, 90_000);
+  }
+
+  private dictEnd(foldSeconds = 0.6) {
+    if (this.dictWatchdog != null) window.clearTimeout(this.dictWatchdog);
+    this.dictWatchdog = null;
+    if (this.dictDoneTimer != null) window.clearTimeout(this.dictDoneTimer);
+    this.dictDoneTimer = null;
+    this.dictDone = false;
+    this.dictCopy.textContent = "Copy";
+    if (!this.dictActive) return;
+    this.dictActive = false;
+    // A chip over an open card leaves it open: the dictation did not open the island.
+    const wasOver = this.dictOver;
+    this.dictOver = false;
+    this.dictEl.style.display = "none";
+    this.dictEl.classList.remove("over");
+    this.syncRec();
+    this.fsm.hold = false;
+    if (!wasOver && !this.fsm.pinned && !this.wasInIsland) this.fsm.fold(foldSeconds);
+  }
+
+  private armDictDone(ms: number) {
+    if (this.dictDoneTimer != null) window.clearTimeout(this.dictDoneTimer);
+    // The pointer on the island keeps the Copy button where it is.
+    this.dictDoneTimer = window.setTimeout(() => {
+      this.dictDoneTimer = null;
+      if (this.wasInIsland) return this.armDictDone(2000);
+      this.dictEnd(0.4);
+    }, ms);
+  }
+
+  /** The dictation's state from Rust (`pill-state`): what to show, if anything. */
+  onDictation(s: { phase: string; noteStartedAt?: number | null; announcement?: { text: string } | null }) {
+    this.setRec(s.noteStartedAt ?? null);
+    const listening = s.phase === "listening" || s.phase === "locked";
+    this.dictListening = listening;
+    if (listening || s.phase === "thinking") {
+      // A new dictation takes over from the check mark of the last one.
+      if (this.dictDoneTimer != null) window.clearTimeout(this.dictDoneTimer);
+      this.dictDoneTimer = null;
+      this.dictDone = false;
+      this.dictCopy.textContent = "Copy";
+      if (!this.dictStart()) return;
+      if (listening) {
+        this.dictShow("listen", s.phase === "locked" ? "hands-free" : "");
+        this.dictEl.classList.toggle("locked", s.phase === "locked");
+      }
+      else this.dictShow("think", "processing");
+      return;
+    }
+    // The check mark and Copy hold the island: the rest of the pill's states wait.
+    if (this.dictDone) return;
+    const note = s.phase === "copied" || s.phase === "failed" || s.phase === "pastedAgain" || s.announcement != null;
+    if (note) {
+      if (!this.dictStart()) return;
+      const label =
+        s.phase === "copied" ? "copied" : s.phase === "pastedAgain" ? "pasted again" : (s.announcement?.text ?? "");
+      this.dictShow("note", label);
+    } else if (this.dictActive) {
+      this.dictEnd();
+    }
+  }
+
+  /** The words were pasted (or only copied): the bar becomes a check mark, with Copy. */
+  onDictationDone(d: { pasted: boolean }) {
+    // The user is already speaking again: the new dictation owns the island.
+    if (this.dictListening) return;
+    if (!this.dictStart()) return;
+    this.dictDone = true;
+    this.dictShow("done", d.pasted ? "" : "on clipboard");
+    this.armDictDone(8000);
+  }
+
+  /** The Copy button: the whole dictation onto the clipboard. */
+  private async copyDictation() {
+    const ok = await Bridge.flowCopyLast();
+    this.dictCopy.textContent = ok ? "Copied ✓" : "Failed";
+    this.armDictDone(1500);
+  }
+
+  /** The nine bands of the voice, about 30 times a second while it is heard. */
+  onDictationBands(levels: number[]) {
+    if (!this.dictActive) return;
+    this.kickDictWatchdog();
+    this.dictBars.forEach((b, i) => {
+      b.style.height = `${4 + 16 * Math.max(0, Math.min(1, levels[i] ?? 0))}px`;
+    });
   }
 
   // ── FSM ─────────────────────────────────────────────────────────────────────
@@ -408,7 +684,9 @@ export class Island {
   private wireFsm() {
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
     this.fsm.openOnHover = State.settings.openOnHover;
+    this.fsm.strictHide = ALWAYS_HIDE || closedIsland(State.settings.closedIsland) === "hidden";
     this.fsm.onTransition = (from, to) => {
+      void Bridge.log(`island ${from} -> ${to}`);
       // The greeting is over, however it ended: back to his desktop spot.
       if (from === "coucou" && to !== "coucou") this.desktop.launch();
       switch (to) {
@@ -449,6 +727,10 @@ export class Island {
     const prev = State.mode;
     if (mode === prev) return;
     State.mode = mode;
+    // A card opening (a click, an alert) takes the island over: the dictation
+    // overlay must never sit on top of it, nor keep the island pinned.
+    if (mode === "expanded") this.dictEnd();
+    this.syncRec();
     if (mode === "expanded") Sound.play("open");
     if (prev === "expanded") {
       Sound.play("close");
@@ -524,6 +806,18 @@ export class Island {
     State.notify();
   }
 
+  /**
+   * "OK" on a finished card and the like: a pinned island stays open on its
+   * usual view instead of folding and losing the pin (Arthur, 23/11).
+   */
+  dismiss() {
+    if (State.isPinned && !State.pendingApproval && State.mode === "expanded") {
+      this.setView(State.defaultView());
+      return;
+    }
+    this.collapse();
+  }
+
   collapse() {
     // A waiting card is only ever folded, never dropped by a close.
     if (State.pendingApproval) {
@@ -539,10 +833,36 @@ export class Island {
   }
 
   /** Alert from the hook server: open on this view. Pinned alerts never auto-close. */
-  alert(view: IslandViewName) {
+  alert(view: IslandViewName, notice = false) {
+    // Subtle mode: a notice (a session finished, an error, a question, an
+    // approval) only brings up the compact island. Mochi shows it in the state's
+    // colour and with its symbol; a click or the hover opens the card as usual.
+    // `notice` is false for what you asked for yourself (shortcuts, the tray).
+    if (notice && State.subtle && State.mode !== "expanded") {
+      this.quietNotice();
+      return;
+    }
     this.fsm.pinned = State.isPinned;
     this.fsm.forceHome();
     this.expand(view);
+  }
+
+  /**
+   * The subtle-mode notice: compact island up (from hidden, without the peek
+   * sound: the notice has its own), and out again after a while. A card that waits for an
+   * answer keeps it on screen until it is answered, like a folded card.
+   */
+  private quietNotice() {
+    if (State.pendingApproval) this.fsm.pinned = true;
+    // The notice has its own sound (hooks.ts): no second "peek" on top of it.
+    if (this.fsm.state === "hidden") {
+      this.silentReveal = true;
+      this.fsm.reveal();
+      this.silentReveal = false;
+    } else if (this.fsm.state === "petit" && !State.pendingApproval) {
+      this.fsm.fold(8);
+    }
+    State.notify();
   }
 
   /** A new Coucou waits and Mochi has nothing else to say (he is blue). */
@@ -603,7 +923,13 @@ export class Island {
 
   /** An alert stopped waiting for an answer: let the island auto-close again. */
   dropPin() {
-    this.fsm.pinned = false;
+    // The card's hold goes, but the header pin (the user's own) stays.
+    if (this.foldPinned) {
+      this.foldPinned = false;
+      State.isPinned = false;
+    }
+    this.fsm.pinned = State.isPinned;
+    if (State.isPinned) return;
     // The countdown the pin held back starts now, if the mouse is elsewhere.
     if (!this.wasInIsland) this.fsm.mouseLeft();
   }
@@ -850,6 +1176,7 @@ export class Island {
 
   /** The closed island stays on screen (anything but "hidden"). */
   private get closedShows(): boolean {
+    if (ALWAYS_HIDE) return false; // not even the black shape
     return closedIsland(State.settings.closedIsland) !== "hidden";
   }
 
@@ -945,7 +1272,7 @@ export class Island {
   private scheduleClosedLife() {
     if (this.closedLife != null) window.clearTimeout(this.closedLife);
     this.closedLife = null;
-    if (State.mode !== "hidden" || closedIsland(State.settings.closedIsland) !== "mochi") {
+    if (State.mode !== "hidden" || !this.closedShows || closedIsland(State.settings.closedIsland) !== "mochi") {
       this.closedLook = { x: 0, y: 0 };
       return;
     }
@@ -1023,11 +1350,30 @@ export class Island {
     // pointer coming onto it is all there is to hear, and it wakes the island.
     const wake = () => {
       Sound.resume();
-      if (State.mode === "hidden") this.fsm.mouseEntered();
+      if (State.mode === "hidden") {
+        if (!this.hoverLogged) {
+          this.hoverLogged = true;
+          void Bridge.log("island hover on the folded strip: waiting to show");
+        }
+        this.fsm.mouseEntered();
+      }
     };
     this.wakeStrip.addEventListener("mouseenter", wake);
     this.root.addEventListener("mouseover", () => {
       if (this.collapsed) wake();
+    });
+    // Folded, a click on the strip opens the island at once, hover wait or not.
+    this.root.addEventListener("mousedown", (e) => {
+      if (State.mode !== "hidden" || e.button !== 0) return;
+      Sound.resume();
+      void Bridge.log("island click on the folded strip: opening");
+      this.fsm.clickHidden();
+    });
+    // Folded, leaving the strip cancels the wait before the island shows.
+    this.root.addEventListener("mouseleave", () => {
+      if (this.hoverLogged) void Bridge.log("island pointer left the strip");
+      this.hoverLogged = false;
+      if (State.mode === "hidden") this.fsm.mouseLeft();
     });
 
     this.islandEl.addEventListener("mousedown", (e) => {
@@ -1569,6 +1915,7 @@ export class Island {
     Sound.setVolume(State.settings.soundVolume);
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
     this.fsm.openOnHover = State.settings.openOnHover;
+    this.fsm.strictHide = ALWAYS_HIDE || closedIsland(State.settings.closedIsland) === "hidden";
     State.notify();
     // ponytail: one timer for the life of the window; a minute is the clock's finest tick.
     this.clockTimer ??= window.setInterval(() => this.updateClock(), 10_000);

@@ -114,7 +114,7 @@ function pillButton(color: string, icon: string, onClick: () => void): HTMLEleme
  */
 export function buildSpotifyPill(task: AgentTask, onTap: () => void): SpotifyPillHost {
   const color = task.color;
-  const mini = createMiniBot(task, 24, () => State.spotifyPlaying);
+  const mini = createMiniBot(task, 48, () => State.spotifyPlaying);
   const label = h("span", { class: "lbl", text: task.name });
   const playBtn = pillButton(color, ICONS.play, togglePlay);
   const nextBtn = pillButton(color, ICONS.forward, () => void Bridge.spotifyControl("next"));
@@ -166,8 +166,10 @@ export function buildSpotifyPill(task: AgentTask, onTap: () => void): SpotifyPil
  * NowPlayingBar: a grey track whose filled part turns green and grows a knob
  * under the pointer; drag or click anywhere on it.
  */
-class NowPlayingBar {
+export class NowPlayingBar {
   readonly el: HTMLElement;
+  /** The colour the filled part takes under the pointer (Spotify's green unless a card says otherwise). */
+  private accent: string;
   private fill: HTMLElement;
   private knob: HTMLElement;
   private hovering = false;
@@ -177,7 +179,8 @@ class NowPlayingBar {
   private onChange: (f: number) => void;
   private onCommit: (f: number) => void;
 
-  constructor(onChange: (f: number) => void, onCommit: (f: number) => void) {
+  constructor(onChange: (f: number) => void, onCommit: (f: number) => void, accent: string = SPOTIFY_GREEN) {
+    this.accent = accent;
     this.onChange = onChange;
     this.onCommit = onCommit;
     this.fill = h("i", { class: "np-fill" });
@@ -236,16 +239,109 @@ class NowPlayingBar {
     this.el.classList.toggle("active", active);
     const pct = `${this.fraction * 100}%`;
     this.fill.style.width = pct;
-    this.fill.style.background = active ? SPOTIFY_GREEN : "#C5C8CD";
-    this.knob.style.left = `clamp(0px, calc(${pct} - 4.5px), calc(100% - 9px))`;
+    this.fill.style.background = active ? this.accent : "#C5C8CD";
+    // --knob is the knob's size, set per bar in the stylesheet (progress and volume differ).
+    this.knob.style.left = `clamp(0px, calc(${pct} - var(--knob) / 2), calc(100% - var(--knob)))`;
   }
 }
 
 /** NowPlayingIconButton: an icon that brightens under the pointer. */
-function iconButton(icon: string, size: number, stroke: number, onClick: () => void): HTMLElement {
+export function iconButton(icon: string, size: number, stroke: number, onClick: () => void): HTMLElement {
   const b = h("button", { class: "np-icon" }, svg(icon, size, stroke ? { stroke } : {}));
   b.addEventListener("click", onClick);
   return b;
+}
+
+/**
+ * A picture that changes by cross-fading: two layers, the new one is loaded and
+ * decoded behind the old one, then they swap opacity (CSS transition). Nothing
+ * pops when a track changes, and a cover that arrives late never shows an older
+ * track's picture.
+ */
+export class CoverFade {
+  readonly el: HTMLElement;
+  private layers: HTMLImageElement[];
+  private front = 0;
+  private url: string | null = null;
+
+  constructor(cls: string) {
+    this.layers = [0, 1].map(() => h("img", { alt: "", draggable: "false" }));
+    this.el = h("div", { class: cls }, ...this.layers);
+  }
+
+  set(url: string | null) {
+    if (url === this.url) return;
+    this.url = url;
+    this.el.classList.toggle("has", url != null);
+    if (url == null) {
+      for (const l of this.layers) l.classList.remove("on");
+      return;
+    }
+    const back = this.layers[1 - this.front];
+    const swap = () => {
+      if (this.url !== url) return; // a newer cover came meanwhile
+      back.classList.add("on");
+      this.layers[this.front].classList.remove("on");
+      this.front = 1 - this.front;
+    };
+    back.src = url;
+    back.decode().then(swap, swap);
+  }
+}
+
+// A text that changes fades out, is replaced, and fades back in (.np-swap).
+const swaps = new WeakMap<HTMLElement, { timer: number; target: string }>();
+
+/**
+ * A title or artist line wider than its box slides back and forth to show the
+ * rest, instead of ending in "…" (Arthur, 23/11). Idempotent: call it whenever
+ * the text or the width may have changed; it only works while the line is laid
+ * out (a hidden view measures 0 and is looked at again on the next sync).
+ */
+export function fitMarquee(el: HTMLElement) {
+  const width = el.clientWidth;
+  if (!width) return;
+  const inner = el.firstElementChild?.classList.contains("mq") ? (el.firstElementChild as HTMLElement) : null;
+  if (!inner) {
+    if (el.scrollWidth <= width + 1) return;
+    const text = el.textContent ?? "";
+    const span = h("span", { class: "mq", text });
+    el.textContent = "";
+    el.append(span);
+    el.classList.add("scrolls");
+    fitMarquee(el);
+    return;
+  }
+  const overflow = Math.ceil(inner.scrollWidth - width);
+  if (overflow <= 1) {
+    el.textContent = inner.textContent;
+    el.classList.remove("scrolls");
+    return;
+  }
+  el.style.setProperty("--mq", `${overflow}px`);
+  // ~28 px a second, never quicker than 4 s: slow enough to read.
+  el.style.setProperty("--mqd", `${Math.max(4, overflow / 28 + 2.4).toFixed(1)}s`);
+}
+
+export function swapText(el: HTMLElement, text: string, animate: boolean) {
+  const pending = swaps.get(el);
+  if (pending?.target === text) return;
+  if (pending) window.clearTimeout(pending.timer);
+  swaps.delete(el);
+  if (!animate || el.textContent === "" || el.textContent === text) {
+    el.textContent = text;
+    el.classList.remove("swap", "scrolls");
+    requestAnimationFrame(() => fitMarquee(el));
+    return;
+  }
+  el.classList.add("swap");
+  const timer = window.setTimeout(() => {
+    swaps.delete(el);
+    el.textContent = text;
+    el.classList.remove("swap", "scrolls");
+    requestAnimationFrame(() => fitMarquee(el));
+  }, 150);
+  swaps.set(el, { timer, target: text });
 }
 
 export interface SpotifyCardHost {
@@ -253,24 +349,41 @@ export interface SpotifyCardHost {
   sync(): void;
 }
 
-/** SpotifyCardView: now playing, or the idle card (not playing / not installed). */
+/**
+ * SpotifyCardView: now playing, or the idle card (not playing / not installed).
+ *
+ * Now playing takes the island's whole left card, widened to 538 px while the
+ * other pills fold into a slim rail (the `.sp` class on the overview, views.ts).
+ * Everything sits on a 4 px grid inside it, 88 px tall like the cover:
+ *   44  cover | title + artist, and the transport on the right of the same row
+ *    8
+ *   12  progress
+ *    8
+ *   16  shuffle, repeat … volume
+ * so every gap between rows is the same 8 px.
+ */
 export function buildSpotifyCard(): SpotifyCardHost {
   const green = SPOTIFY_GREEN;
 
-  // Now playing: artwork row, progress row, controls row.
-  const art = h("div", { class: "np-art" });
-  const artImg = h("img", { alt: "", draggable: "false" }) as HTMLImageElement;
-  const artNote = svg(ICONS.musicNote, 16);
+  // Now playing: the cover's colours behind the card, the cover itself, the text.
+  const glow = new CoverFade("np-glow");
+  const art = new CoverFade("np-art");
+  const artNote = svg(ICONS.musicNote, 22);
   artNote.style.color = `${green}b3`;
-  art.append(artNote, artImg);
-  art.addEventListener("click", () => void Bridge.spotifyOpen());
+  art.el.append(artNote);
+  art.el.addEventListener("click", () => void Bridge.spotifyOpen());
+  const eq = h("span", { class: "np-eq" }, h("i"), h("i"), h("i"));
   const title = h("span", { class: "np-title" });
   const subtitle = h("div", { class: "np-sub" });
-  const head = h("div", { class: "np-head" },
-    art,
-    h("div", { class: "np-text" }, h("div", { class: "np-title-row" }, dot(green, 6), title), subtitle),
-  );
+  const text = h("div", { class: "np-text" }, h("div", { class: "np-title-row" }, eq, title), subtitle);
 
+  // Transport: previous, play (the main button), next.
+  const prev = h("button", { class: "np-skip", onclick: () => void Bridge.spotifyControl("previous") }, svg(ICONS.backward, 22));
+  const next = h("button", { class: "np-skip", onclick: () => void Bridge.spotifyControl("next") }, svg(ICONS.forward, 22));
+  const play = h("button", { class: "np-play", onclick: togglePlay });
+  const transport = h("div", { class: "np-transport" }, prev, play, next);
+
+  // Progress.
   let dragFraction: number | null = null;
   const elapsed = h("span", { class: "np-time elapsed" });
   const remaining = h("span", { class: "np-time remaining" });
@@ -287,25 +400,18 @@ export function buildSpotifyCard(): SpotifyCardHost {
   );
   const progressRow = h("div", { class: "np-progress" }, elapsed, progress.el, remaining);
 
-  const shuffle = iconButton(ICONS.shuffle, 10, 2.2, () => setFlag("shuffle", !Spotify.state.shuffle));
-  const prev = iconButton(ICONS.backward, 11, 0, () => void Bridge.spotifyControl("previous"));
-  const next = iconButton(ICONS.forward, 11, 0, () => void Bridge.spotifyControl("next"));
-  const repeat = iconButton(ICONS.repeat, 10, 2.2, () => setFlag("repeat", !Spotify.state.repeat));
-  prev.style.color = "#C5C8CD";
-  next.style.color = "#C5C8CD";
-  const play = h("button", { class: "np-play", onclick: togglePlay });
+  // Shuffle and repeat on the left, the volume on the right.
+  const shuffle = iconButton(ICONS.shuffle, 16, 2.2, () => setFlag("shuffle", !Spotify.state.shuffle));
+  const repeat = iconButton(ICONS.repeat, 16, 2.2, () => setFlag("repeat", !Spotify.state.repeat));
   const volIcon = h("span", { class: "np-vol-icon" });
   const volume = new NowPlayingBar(
     (f) => setVolume(f * 100),
     (f) => setVolume(f * 100),
   );
   const volumeBox = h("div", { class: "np-volume" }, volIcon, volume.el);
-  const controls = h("div", { class: "np-controls" },
-    h("div", { class: "np-buttons" }, shuffle, prev, play, next, repeat),
-    h("div", { class: "grow" }),
-    volumeBox,
-  );
-  const playingEl = h("div", { class: "np-card" }, head, progressRow, controls);
+  const extra = h("div", { class: "np-extra" }, h("div", { class: "np-flags" }, shuffle, repeat), volumeBox);
+
+  const playingEl = h("div", { class: "np-wide" }, glow.el, art.el, text, transport, progressRow, extra);
 
   // Idle: the same layout as the other idle cards.
   const idleDot = dot("#22C55E", 5);
@@ -357,24 +463,23 @@ export function buildSpotifyCard(): SpotifyCardHost {
 
   function syncPlaying(track: SpotifyTrack) {
     const s = Spotify.state;
+    // The first track fills in at once; a later one fades over the old text.
+    const animate = shownTrack != null;
     if (shownTrack !== track) {
       shownTrack = track;
-      title.textContent = isAd(track) ? t("Advertisement") : track.title;
+      swapText(title, isAd(track) ? t("Advertisement") : track.title, animate);
       const sub = [track.artist, track.album].filter((x) => x).join(" · ");
-      subtitle.textContent = sub;
-      subtitle.style.display = sub ? "" : "none";
+      swapText(subtitle, sub, animate);
     } else if (isAd(track)) {
-      title.textContent = t("Advertisement");
+      swapText(title, t("Advertisement"), false);
     }
-    art.title = track.album ? t("{0} — open Spotify", { 0: track.album }) : t("Open Spotify");
+    fitMarquee(title);
+    fitMarquee(subtitle);
+    art.el.title = track.album ? t("{0} — open Spotify", { 0: track.album }) : t("Open Spotify");
     const cover = currentArtwork(s);
-    if (cover) {
-      if (artImg.getAttribute("src") !== cover) artImg.setAttribute("src", cover);
-      art.classList.add("has-art");
-    } else {
-      art.classList.remove("has-art");
-      artImg.removeAttribute("src");
-    }
+    art.set(cover);
+    glow.set(cover);
+    playingEl.classList.toggle("playing", s.playing);
 
     progress.enabled = !isAd(track) && track.duration > 0;
     paintProgress();
@@ -388,7 +493,7 @@ export function buildSpotifyCard(): SpotifyCardHost {
     if (playIcon !== s.playing) {
       playIcon = s.playing;
       clear(play);
-      const icon = svg(s.playing ? ICONS.pause : ICONS.play, 9);
+      const icon = svg(s.playing ? ICONS.pause : ICONS.play, 18);
       if (!s.playing) icon.style.transform = "translateX(1px)";
       play.append(icon);
     }
@@ -398,7 +503,7 @@ export function buildSpotifyCard(): SpotifyCardHost {
     if (level !== volIconLevel) {
       volIconLevel = level;
       clear(volIcon);
-      volIcon.append(svg([ICONS.volume0, ICONS.volume1, ICONS.volume2, ICONS.volume3][level], 10, { stroke: 2.2 }));
+      volIcon.append(svg([ICONS.volume0, ICONS.volume1, ICONS.volume2, ICONS.volume3][level], 14, { stroke: 2.2 }));
     }
     volume.set(s.volume / 100);
     volumeBox.title = t("Volume {0}%", { 0: s.volume });

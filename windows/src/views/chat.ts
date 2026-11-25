@@ -34,6 +34,7 @@ const STRINGS = {
 };
 
 let nextId = 1;
+let historyLoaded = false;
 
 function bubble(message: ChatMessage): HTMLElement {
   if (message.role === "user") {
@@ -313,6 +314,8 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     try {
       const reply = await Bridge.chatSend(query, context, MailChat.on && HOST_OS === "windows");
       State.chatHistory.push({ id: nextId++, role: "assistant", content: reply.text });
+      // A very long conversation keeps its last 60 messages on the page (memory, 23/11/2026).
+      if (State.chatHistory.length > 60) State.chatHistory.splice(0, State.chatHistory.length - 60);
       State.stateOverride = null;
       Sound.play("finish");
     } catch (err) {
@@ -335,6 +338,18 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
         input.focus();
       }
     }
+  }
+
+  // The chat remembers across restarts: show what the app saved, once per run.
+  if (!historyLoaded) {
+    historyLoaded = true;
+    void Bridge.chatHistory().then((saved) => {
+      if (State.chatHistory.length > 0 || !saved?.length) return;
+      State.chatHistory = saved.map((m) => ({ id: nextId++, role: m.role, content: m.content }));
+      renderedCount = -1;
+      State.notify();
+      onHeightChange();
+    });
   }
 
   send.addEventListener("click", () => void submit());
