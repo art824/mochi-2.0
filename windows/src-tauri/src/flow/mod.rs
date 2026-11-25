@@ -335,6 +335,24 @@ fn begin(app: &AppHandle, flow: &Arc<Flow>) -> Option<Listening> {
     let mic = flow.store.lock().unwrap().prefs.mic.clone();
     let take = Arc::new(Mutex::new(audio::Take::default()));
     let sink_take = take.clone();
+    // A muted microphone opens fine and records only silence: say so now, before the user talks
+    // for nothing (25/11/2026). Only the default microphone can be checked.
+    let uses_default = mic.is_empty() || audio::default_mic_name().is_some_and(|d| d == mic);
+    if uses_default && audio::default_mic_muted() == Some(true) {
+        crate::log::line("flow: the microphone is muted in Windows");
+        pill::update(app, |s| s.phase = "failed".into());
+        pill::rest_after(app, "failed", 1800);
+        pill::announce(
+            app,
+            "mic",
+            "#FF6B6B",
+            t("Your microphone is muted in Windows. Unmute it (Quick Settings or the mic key) and try again."),
+            None,
+            8,
+        );
+        return None;
+    }
+    let mic_label = mic.clone();
     let source = audio::Source::Mic(if mic.is_empty() { None } else { Some(mic) });
     let capture = audio::Capture::start(source, move |samples| {
         let mut t = sink_take.lock().unwrap();
@@ -347,6 +365,11 @@ fn begin(app: &AppHandle, flow: &Arc<Flow>) -> Option<Listening> {
     });
     match capture {
         Ok(capture) => {
+            crate::log::line(format!(
+                "flow: listening (mic: {}, model {})",
+                if mic_label.is_empty() { "Windows default" } else { mic_label.as_str() },
+                if speech::is_loaded() { "loaded" } else { "loading" }
+            ));
             let app_front = os::foreground_app().filter(|(id, _)| !is_shell(id));
             pill::update(app, |s| s.phase = "listening".into());
             let quiet = flow.store.lock().unwrap().prefs.mute_others;
@@ -378,8 +401,27 @@ fn finish(app: &AppHandle, flow: &Arc<Flow>, mut l: Listening, busy: Arc<AtomicB
         let mut t = l.take.lock().unwrap();
         (std::mem::take(&mut t.samples), t.peak)
     };
+    crate::log::line(format!(
+        "flow: let go after {seconds:.1}s: {:.1}s of audio, loudest {peak:.4}",
+        samples.len() as f64 / 16_000.0
+    ));
     // Too short or silent: nothing to send to the model.
     if samples.len() < 16_000 / 4 || peak < 0.004 {
+        // Silent audio used to end here without a word, which looked like "dictation does nothing"
+        // (25/11). Now it says why, on screen and in the log.
+        if samples.len() >= 16_000 / 4 {
+            crate::log::line("flow: the microphone gave only silence");
+            pill::announce(
+                app,
+                "mic",
+                "#FF6B6B",
+                t("Coucou heard only silence: check the microphone (muted, or another one chosen in Settings → Dictation)."),
+                None,
+                8,
+            );
+        } else if samples.is_empty() {
+            crate::log::line("flow: the microphone sent no audio at all");
+        }
         pill::update(app, |s| s.phase = "idle".into());
         return;
     }
@@ -413,6 +455,7 @@ fn process(app: &AppHandle, flow: &Arc<Flow>, samples: &[f32], front: Option<&(S
     let transcript = speech::transcribe(samples).ok_or("the voice model is not loaded")?;
     let raw = transcript.text.trim().to_string();
     if raw.is_empty() {
+        crate::log::line(format!("flow: the model heard no words ({:?})", started.elapsed()));
         settle(app);
         return Ok(());
     }

@@ -1,6 +1,7 @@
 // The "Media" card: what plays on this computer that is not Spotify (a YouTube tab, a video player).
 // It is the Spotify card's twin — same cover, same text swap, same transport, same progress bar,
-// same wide layout — without shuffle, repeat and volume; the app's name sits where those are.
+// same wide layout, same volume (the playing app's own, in the Windows mixer) — without shuffle and
+// repeat; the app's name sits where those are.
 // What it shows comes from src-tauri/src/media.rs through island/media.ts.
 
 import { h, svg, clear, dot } from "./dom";
@@ -10,9 +11,34 @@ import { State } from "../core/state";
 import { MEDIA_ID, Media, clock, mediaPosition } from "../core/media";
 import { pillDefinition } from "../core/pills";
 import { CoverFade, NowPlayingBar, fitMarquee, swapText } from "./spotify";
+import { volumeLevel } from "../core/spotify";
 import { N_, t } from "../i18n/i18n";
 
 export const MEDIA_COLOR = pillDefinition(MEDIA_ID)?.color ?? "#FF0000";
+
+// A slider drag sends at most one volume every 120 ms, like the Spotify card's.
+let pendingVolume: number | null = null;
+let volumeTimer: number | null = null;
+
+function setVolume(value: number) {
+  if (Media.state.volume < 0) return;
+  const v = Math.min(100, Math.max(0, Math.round(value)));
+  Media.state = { ...Media.state, volume: v };
+  State.notify();
+  pendingVolume = v;
+  if (volumeTimer != null) return;
+  const send = () => {
+    const next = pendingVolume;
+    pendingVolume = null;
+    if (next == null) {
+      volumeTimer = null;
+      return;
+    }
+    void Bridge.mediaControl("volume", next);
+    volumeTimer = window.setTimeout(send, 120);
+  };
+  send();
+}
 
 export interface MediaCardHost {
   el: HTMLElement;
@@ -53,7 +79,16 @@ export function buildMediaCard(): MediaCardHost {
   const progressRow = h("div", { class: "np-progress" }, elapsed, progress.el, remaining);
 
   const appName = h("span", { class: "np-app" });
-  const extra = h("div", { class: "np-extra" }, h("div", { class: "np-flags" }, appName));
+  // The app's name on the left, its volume on the right (where the Spotify card has its own).
+  const volIcon = h("span", { class: "np-vol-icon" });
+  const volume = new NowPlayingBar(
+    (f) => setVolume(f * 100),
+    (f) => setVolume(f * 100),
+    MEDIA_COLOR,
+  );
+  const volumeBox = h("div", { class: "np-volume" }, volIcon, volume.el);
+  let volShown: number | null = null;
+  const extra = h("div", { class: "np-extra" }, h("div", { class: "np-flags" }, appName), volumeBox);
   const playingEl = h("div", { class: "np-wide" }, glow.el, art.el, text, transport, progressRow, extra);
 
   // Pill on, nothing playing: the same layout as the other idle cards.
@@ -124,6 +159,18 @@ export function buildMediaCard(): MediaCardHost {
       play.append(icon);
     }
     play.title = s.playing ? t("Pause") : t("Play");
+    // No sound session yet (nothing came out of the speakers): no slider.
+    volumeBox.style.visibility = s.volume < 0 ? "hidden" : "";
+    if (s.volume >= 0) {
+      const level = volumeLevel(s.volume);
+      if (volShown !== level) {
+        volShown = level;
+        clear(volIcon);
+        volIcon.append(svg([ICONS.volume0, ICONS.volume1, ICONS.volume2, ICONS.volume3][level], 14, { stroke: 2.2 }));
+      }
+      volume.set(s.volume / 100);
+      volumeBox.title = t("Volume {0}%", { 0: s.volume });
+    }
   }
 
   return {

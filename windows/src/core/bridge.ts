@@ -496,7 +496,7 @@ export const Bridge = {
   toastScopeSet: (all: boolean) => call<void>("toast_scope_set", { all }),
   /** "Media" (media.rs): the last report, and the card's buttons. */
   mediaState: () => call<MediaState>("media_state"),
-  mediaControl: (action: "playpause" | "next" | "prev" | "seek", value?: number) =>
+  mediaControl: (action: "playpause" | "next" | "prev" | "seek" | "volume", value?: number) =>
     call<boolean>("media_control", { action, value: value ?? null }),
   /** Enter or the send button only. True once the gateway took it. */
   whatsappSend: (chat: string, text: string) => call<boolean>("whatsapp_send", { chat, text }),

@@ -266,6 +266,11 @@ pub fn remove(app: &AppHandle) {
 
 // ── Recognition ───────────────────────────────────────────────────────────────
 
+/// Whether the model is in memory right now (for the log).
+pub fn is_loaded() -> bool {
+    recognizer_slot().lock().unwrap().is_some()
+}
+
 fn recognizer_slot() -> &'static Mutex<Option<Arc<OfflineRecognizer>>> {
     static R: OnceLock<Mutex<Option<Arc<OfflineRecognizer>>>> = OnceLock::new();
     R.get_or_init(|| Mutex::new(None))
@@ -315,9 +320,10 @@ fn trim_working_set() {}
 /// One thread, started once: after `TRIM_AFTER` without the model being asked for, gives its
 /// physical memory back to Windows — once per quiet stretch. The model stays loaded.
 pub fn start_idle_watch(_app: &AppHandle) {
-    // Turned off on 25/11 (Arthur: dictation stopped working; "always on, even if it takes RAM").
-    // The model stays loaded and untouched, as in the original. Set to true to bring the trim back.
-    const TRIM_ENABLED: bool = false;
+    // Off in build 19 (25/11) to test whether it broke dictation: it did not — dictation stayed
+    // broken with the model always loaded — so it is back on (Arthur: "make it work with the
+    // memory saving"). Set to false to keep the model's memory untouched.
+    const TRIM_ENABLED: bool = true;
     static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !TRIM_ENABLED || STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return;

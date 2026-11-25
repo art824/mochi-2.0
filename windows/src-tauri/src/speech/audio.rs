@@ -213,6 +213,33 @@ pub fn input_devices() -> Vec<InputDevice> {
     out
 }
 
+/// Whether Windows has the default microphone muted (Quick Settings, a mic key, another app).
+/// A muted microphone still opens and sends audio — all silence — so dictation looked dead without
+/// a word (25/11/2026: the cause of "dictate does nothing"). None when it can't be told.
+#[cfg(windows)]
+pub fn default_mic_muted() -> Option<bool> {
+    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+    use windows::Win32::Media::Audio::{eCapture, eConsole, IMMDeviceEnumerator, MMDeviceEnumerator};
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let device = devices.GetDefaultAudioEndpoint(eCapture, eConsole).ok()?;
+        let volume: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None).ok()?;
+        volume.GetMute().ok().map(|m| m.as_bool())
+    }
+}
+
+#[cfg(not(windows))]
+pub fn default_mic_muted() -> Option<bool> {
+    None
+}
+
+/// The default microphone's name, as `input_devices` lists it.
+pub fn default_mic_name() -> Option<String> {
+    cpal::default_host().default_input_device().map(|d| device_name(&d))
+}
+
 fn is_monitor(d: &cpal::Device) -> bool {
     let id = device_id(d).to_lowercase();
     let name = device_name(d).to_lowercase();

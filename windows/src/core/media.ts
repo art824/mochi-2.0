@@ -16,11 +16,13 @@ export interface MediaState {
   /** The cover (data URL), sent once per track. */
   art: string | null;
   artKey: string;
+  /** The app's own volume in the Windows mixer, 0…100; -1 while it has no sound session. */
+  volume: number;
 }
 
 export const EMPTY_MEDIA: MediaState = {
   present: false, app: "", title: "", artist: "", playing: false,
-  position: 0, duration: 0, atMs: 0, art: null, artKey: "",
+  position: 0, duration: 0, atMs: 0, art: null, artKey: "", volume: -1,
 };
 
 export const Media: { state: MediaState; art: string | null } = { state: EMPTY_MEDIA, art: null };

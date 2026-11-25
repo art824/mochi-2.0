@@ -52,7 +52,7 @@ export async function media(o: { playing?: boolean; present?: boolean } = {}) {
   applyMedia(present ? {
     ...EMPTY_MEDIA, present: true, app: "Chrome", title: "Lofi hip hop radio — beats to relax/study to",
     artist: "Lofi Girl", playing: o.playing ?? true, position: 84, duration: 3600, atMs: Date.now(),
-    art: cover(), artKey: "k1",
+    art: cover(), artKey: "k1", volume: 62,
   } : EMPTY_MEDIA);
   await front(MEDIA_ID);
 }

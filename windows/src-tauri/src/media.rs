@@ -33,6 +33,8 @@ pub struct MediaState {
     /// The cover as a data URL; sent once per track (None when the page already has it).
     pub art: Option<String>,
     pub art_key: String,
+    /// The app's own volume in the Windows mixer, 0…100; -1 while it has no sound session.
+    pub volume: i32,
 }
 
 static STATE: LazyLock<Mutex<MediaState>> = LazyLock::new(|| Mutex::new(MediaState::default()));
@@ -47,7 +49,8 @@ pub fn media_state() -> MediaState {
     STATE.lock().unwrap().clone()
 }
 
-/// The card's buttons: "playpause", "next", "prev" and "seek" (value = seconds).
+/// The card's buttons: "playpause", "next", "prev", "seek" (value = seconds) and "volume" (0…100,
+/// the playing app's own volume in the Windows mixer, like the Spotify card's).
 #[tauri::command]
 pub fn media_control(action: String, value: Option<f64>) -> bool {
     #[cfg(windows)]
@@ -116,7 +119,16 @@ mod win {
         GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
     };
     use windows::Storage::Streams::DataReader;
-    use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Media::Audio::{
+        eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, ISimpleAudioVolume,
+        MMDeviceEnumerator,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::core::Interface;
 
     use super::{friendly, now_ms, MediaState, ACTIVE, STATE};
     use std::sync::atomic::Ordering;
@@ -152,6 +164,84 @@ mod win {
         best.map(|(_, s)| s)
     }
 
+    // ── Volume: the playing app in the Windows mixer (as spotify.rs does for Spotify) ──
+
+    /// "C:\…\chrome.exe" → "chrome".
+    fn exe_stem(pid: u32) -> Option<String> {
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+            let mut buf = [0u16; 1024];
+            let mut len = buf.len() as u32;
+            let named = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len);
+            let _ = CloseHandle(process);
+            named.ok()?;
+            let path = String::from_utf16_lossy(&buf[..len as usize]);
+            let name = path.rsplit(['\\', '/']).next()?.to_lowercase();
+            Some(name.trim_end_matches(".exe").to_string())
+        }
+    }
+
+    /// Whether a mixer session's program is the media session's app. The overlay names the app by
+    /// its AppUserModelId ("Chrome", "chrome.exe", "Microsoft.ZuneVideo_…!App"); the mixer by the
+    /// program file. They match on the program's name, or on the same friendly name.
+    pub(super) fn same_app(aumid: &str, stem: &str) -> bool {
+        if stem.len() < 3 {
+            return false;
+        }
+        let id = aumid.to_lowercase();
+        id.contains(stem) || super::friendly(&id).eq_ignore_ascii_case(&super::friendly(stem))
+    }
+
+    /// The app's sound sessions on the default output.
+    fn app_audio(aumid: &str) -> Vec<ISimpleAudioVolume> {
+        let mut out = Vec::new();
+        if aumid.is_empty() {
+            return out;
+        }
+        unsafe {
+            let Ok(devices) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) else {
+                return out;
+            };
+            let Ok(device) = devices.GetDefaultAudioEndpoint(eRender, eMultimedia) else { return out };
+            let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else { return out };
+            let Ok(sessions) = manager.GetSessionEnumerator() else { return out };
+            for i in 0..sessions.GetCount().unwrap_or(0) {
+                let Ok(control) = sessions.GetSession(i) else { continue };
+                let Ok(control) = control.cast::<IAudioSessionControl2>() else { continue };
+                let pid = control.GetProcessId().unwrap_or(0);
+                if pid == 0 {
+                    continue;
+                }
+                let Some(stem) = exe_stem(pid) else { continue };
+                if same_app(aumid, &stem) {
+                    if let Ok(volume) = control.cast::<ISimpleAudioVolume>() {
+                        out.push(volume);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn app_volume(aumid: &str) -> i32 {
+        let Some(first) = app_audio(aumid).into_iter().next() else { return -1 };
+        let level = unsafe { first.GetMasterVolume().unwrap_or(-1.0) };
+        if level < 0.0 {
+            -1
+        } else {
+            (level * 100.0).round().clamp(0.0, 100.0) as i32
+        }
+    }
+
+    fn set_app_volume(aumid: &str, percent: f64) -> bool {
+        let level = (percent / 100.0).clamp(0.0, 1.0) as f32;
+        let mut done = false;
+        for v in app_audio(aumid) {
+            done |= unsafe { v.SetMasterVolume(level, std::ptr::null()).is_ok() };
+        }
+        done
+    }
+
     fn thumbnail(props: &MediaProperties) -> Option<Vec<u8>> {
         let stream = props.Thumbnail().ok()?.OpenReadAsync().ok()?.get().ok()?;
         let size = stream.Size().ok()?;
@@ -181,11 +271,13 @@ mod win {
             .GetPlaybackInfo()
             .and_then(|p| p.PlaybackStatus())
             .is_ok_and(|st| st == Status::Playing);
-        let app = friendly(&session.SourceAppUserModelId().map(|x| x.to_string_lossy()).unwrap_or_default());
+        let aumid = session.SourceAppUserModelId().map(|x| x.to_string_lossy()).unwrap_or_default();
+        let app = friendly(&aumid);
         Some((
             MediaState {
                 present: true,
                 app,
+                volume: app_volume(&aumid),
                 art_key: format!("{title}\u{1f}{artist}"),
                 title: title.trim().chars().take(200).collect(),
                 artist: artist.trim().chars().take(200).collect(),
@@ -255,6 +347,7 @@ mod win {
                 || next.artist != last.artist
                 || next.app != last.app
                 || next.playing != last.playing
+                || next.volume != last.volume
                 || (next.duration - last.duration).abs() > 0.5
                 || art_changed
                 || (next.present && moved);
@@ -276,6 +369,15 @@ mod win {
         com();
         let Ok(manager) = Manager::RequestAsync().and_then(|op| op.get()) else { return false };
         let Some(session) = pick(&manager) else { return false };
+        if action == "volume" {
+            let Some(v) = value else { return false };
+            let aumid = session.SourceAppUserModelId().map(|x| x.to_string_lossy()).unwrap_or_default();
+            let done = set_app_volume(&aumid, v);
+            if done {
+                STATE.lock().unwrap().volume = v.round().clamp(0.0, 100.0) as i32;
+            }
+            return done;
+        }
         let result = match action {
             "playpause" => session.TryTogglePlayPauseAsync(),
             "next" => session.TrySkipNextAsync(),
