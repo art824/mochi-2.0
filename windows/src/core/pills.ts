@@ -154,6 +154,10 @@ export const PILL_CATALOG: readonly PillDefinition[] = [
   // software. Settings → Windows notifications picks WhatsApp only or every app.
   { id: "integration_notifications", name: "Notifications", color: "#FFFF77", category: "service",
     subtitle: N_("Windows notifications"), source: "n8n", support: "windows", connect: none },
+  // The phone's notifications, relayed to Windows by Phone Link ("Celular Vinculado"): their own Mochi,
+  // apart from the PC's (Arthur, 25/11/2026). Same reader (toast_wa.rs).
+  { id: "integration_phone", name: "Phone", color: "#99FF00", category: "service",
+    subtitle: N_("Phone notifications"), source: "n8n", support: "windows", connect: none },
 ];
 
 /** The always-on pill unless the user picks another workspace tool. */

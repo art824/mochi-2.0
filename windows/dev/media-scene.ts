@@ -2,7 +2,7 @@
 //   const m = await import("/dev/media-scene.ts"); await m.notifs();   // or: await m.media({ playing: true });
 import { State } from "../src/core/state";
 import { Media, applyMedia, EMPTY_MEDIA, MEDIA_ID } from "../src/core/media";
-import { NOTIF_ID, pushNotif } from "../src/core/notifications";
+import { NOTIF_ID, PHONE_ID, pushNotif } from "../src/core/notifications";
 
 function cover(): string {
   const c = document.createElement("canvas");
@@ -37,13 +37,26 @@ async function front(id: string) {
 
 export async function notifs(n = 4) {
   const items = [
-    { app: "WhatsApp", title: "Ana Souza", whatsapp: true },
-    { app: "Chrome", title: "Nova resposta no seu comentário", whatsapp: false },
-    { app: "OneDrive", title: "Sincronização concluída", whatsapp: false },
+    { app: "Chrome", title: "Nova resposta no seu comentário", body: "Lucas: concordo, mas acho que vale testar com o agregado antes de fechar a conclusão.", whatsapp: false },
+    { app: "OneDrive", title: "Sincronização concluída", body: "Todos os seus arquivos estão atualizados.", whatsapp: false },
     { app: "Ferramenta de Captura", title: "Captura salva", whatsapp: false },
+    { app: "Windows PowerShell", title: "Build pronto", body: "coucou.exe compilado sem erros.", whatsapp: false },
   ];
   for (const it of items.slice(0, n).reverse()) pushNotif(it, Date.now() - Math.random() * 600_000);
   await front(NOTIF_ID);
+}
+
+export async function phone(long = true) {
+  const items = [
+    { app: "Instagram", title: "julia.m curtiu sua foto", phone: true, whatsapp: false },
+    { app: "WhatsApp", title: "Mãe", body: "Chegou bem?", phone: true, whatsapp: true },
+    { app: "WhatsApp", title: "Ana Souza", phone: true, whatsapp: true,
+      body: long
+        ? "Oi! Vi o protótipo do Mochi, ficou muito bom. Duas coisas: o card de notificação podia mostrar a mensagem inteira, e quando chega uma nova a ilha devia abrir sozinha. Consegue ver isso até amanhã? Se precisar, te mando os prints que tirei hoje de manhã com os detalhes."
+        : "Bora almoçar?" },
+  ];
+  for (const it of items) pushNotif(it, Date.now() - Math.random() * 300_000);
+  await front(PHONE_ID);
 }
 
 export async function media(o: { playing?: boolean; present?: boolean } = {}) {

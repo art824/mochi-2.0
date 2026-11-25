@@ -891,6 +891,8 @@ const INTEGRATIONS: IntegrationDef[] = [
   // Nothing to enter either: whatever plays on the PC that is not Spotify (src-tauri/src/media.rs).
   { id: "integration_media", name: "Media", color: pillDefinition("integration_media")?.color ?? "#FF0000", fields: [],
     hint: N_("Anything playing that is not Spotify: a YouTube tab, a video player. Spotify keeps its own pill.") },
+  { id: "integration_phone", name: "Phone", color: pillDefinition("integration_phone")?.color ?? "#99FF00", fields: [],
+    hint: N_("Your phone's notifications (WhatsApp, Instagram…), through Windows' Phone Link app (Celular Vinculado). Connect your phone there first.") },
 ];
 
 const MAX_ACTIVE = MAX_DECLARED;

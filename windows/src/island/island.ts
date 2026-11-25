@@ -883,6 +883,20 @@ export class Island {
     this.fsm.reveal();
   }
 
+  /**
+   * A notification arrived: the island opens expanded on that pill, so it is read big at once
+   * (Arthur, 25/11). A dictation or an open wardrobe is not interrupted: then it only peeks.
+   */
+  showPill(id: string) {
+    if (State.paused) return;
+    if (this.dictActive || State.view !== "overview") {
+      this.fsm.reveal();
+      return;
+    }
+    State.setFocus(id);
+    this.fsm.forceHome();
+  }
+
   /** Music started playing: the compact island, without the peek sound (musicReveal). */
   revealSilently() {
     this.silentReveal = true;

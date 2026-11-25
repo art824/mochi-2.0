@@ -1,42 +1,50 @@
-// Windows notifications → the page (src-tauri/src/toast_wa.rs). Same reaction as a WhatsApp message:
-// the pill lights with the app and the first line, Mochi smiles and "pop" plays — once for a burst —
-// and the pill goes back to idle a minute later. Notices go through island.reveal(), so the subtle
-// mode and the pin treat them like any other news.
+// Windows notifications → the page (src-tauri/src/toast_wa.rs). Two pills: the PC's notifications and
+// the phone's (Phone Link). A notification opens the island expanded on its pill and shows big
+// (Arthur, 25/11/2026: "the Mochi pops up expanded and the notification shows big"); Mochi smiles and
+// "pop" plays — once for a burst — and the pill goes back to idle a minute later.
 
 import { onEvent } from "../core/bridge";
-import { NOTIF_ID, notifLine, pushNotif, type NotifEvent } from "../core/notifications";
+import type { BotEmoteName } from "../core/layout";
+import { notifLine, notifPill, pushNotif, type NotifEvent } from "../core/notifications";
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
-import type { WhatsAppHost } from "./whatsapp";
 
 const ANNOUNCE_GAP_MS = 4_000;
 const RESET_AFTER_MS = 60_000;
 
-let lastAnnounce = -Infinity;
-let resetTimer: number | null = null;
+export interface NotifHost {
+  reveal(): void;
+  /** Opens the island expanded on that pill. */
+  showPill(id: string): void;
+  emote(name: BotEmoteName): void;
+}
 
-export function registerNotificationHandlers(island: WhatsAppHost) {
+let lastAnnounce = -Infinity;
+const resetTimers: Record<string, number> = {};
+
+export function registerNotificationHandlers(island: NotifHost) {
   void onEvent<NotifEvent>("notif-pill", (e) => handleNotif(island, e));
 }
 
-export function handleNotif(island: WhatsAppHost, e: NotifEvent, now = performance.now()) {
-  const t = State.tasks.find((x) => x.id === NOTIF_ID);
+export function handleNotif(island: NotifHost, e: NotifEvent, now = performance.now()) {
+  const pill = notifPill(e);
+  const t = State.tasks.find((x) => x.id === pill);
   if (!t || State.paused) return;
   pushNotif(e);
   t.state = "finished";
   t.steps = [notifLine(e)];
   t.stepIndex = 0;
-  if (State.focusId !== NOTIF_ID) t.pillBadge = "finished";
   if (now - lastAnnounce > ANNOUNCE_GAP_MS) {
     lastAnnounce = now;
     island.emote("happy");
     Sound.play("pop");
   }
-  island.reveal();
-  if (resetTimer != null) window.clearTimeout(resetTimer);
-  resetTimer = window.setTimeout(() => {
-    resetTimer = null;
-    const x = State.tasks.find((y) => y.id === NOTIF_ID);
+  island.showPill(pill);
+  if (State.focusId !== pill) t.pillBadge = "finished";
+  if (resetTimers[pill] != null) window.clearTimeout(resetTimers[pill]);
+  resetTimers[pill] = window.setTimeout(() => {
+    delete resetTimers[pill];
+    const x = State.tasks.find((y) => y.id === pill);
     if (!x || x.state !== "finished") return;
     x.state = "idle";
     x.steps = [];

@@ -32,9 +32,9 @@ import { WHATSAPP_ID } from "../core/whatsapp";
 import { MAIL_ID } from "../core/mail";
 import { buildMailCard } from "./mail";
 import { buildNotifCard } from "./notifications";
-import { NOTIF_ID } from "../core/notifications";
+import { NOTIF_ID, PHONE_ID } from "../core/notifications";
 import { buildMediaCard } from "./media";
-import { MEDIA_ID, Media } from "../core/media";
+import { MEDIA_ID } from "../core/media";
 import type { Outfit, OutfitSelection } from "../mochi/wardrobe";
 import { language, t, tl, type Msg } from "../i18n/i18n";
 import type { ViewCommand } from "../island/shortcuts";
@@ -259,7 +259,8 @@ function buildOverview(actions: ViewActions): ViewHost {
   // Mail's card too (classic Outlook): the search field keeps its text and the keyboard.
   const mailCard = buildMailCard({ keyboard: (on) => actions.keyboard(on) });
   // Windows notifications and Media: wide cards like Spotify's, kept and updated in place.
-  const notifCard = buildNotifCard();
+  const notifCard = buildNotifCard(NOTIF_ID);
+  const phoneCard = buildNotifCard(PHONE_ID);
   const mediaCard = buildMediaCard();
   const whatsappCard = buildWhatsAppCard({
     openSettings: () => actions.openSettingsWindow(),
@@ -267,15 +268,53 @@ function buildOverview(actions: ViewActions): ViewHost {
     holdOpen: (on) => actions.holdOpen(on),
   });
 
+  const rightCol = h("div", { class: "right" }, right);
   const el = h("div", { class: "view overview" },
     h("div", { class: "left" }, left),
-    h("div", { class: "right" }, right),
+    rightCol,
   );
+
+  // The main card is always wide, the other pills a slim rail (Arthur, 25/11). Resting the pointer
+  // on the rail for a moment opens it to half — the pills' names come back — and the main card
+  // becomes half too; leaving the rail brings the wide card back.
+  const PEEK_AFTER_MS = 1200;
+  const UNPEEK_AFTER_MS = 350;
+  let peek = false;
+  let peekTimer: number | null = null;
+  const clearPeekTimer = () => {
+    if (peekTimer != null) window.clearTimeout(peekTimer);
+    peekTimer = null;
+  };
+  rightCol.addEventListener("mouseenter", () => {
+    clearPeekTimer();
+    if (peek) return;
+    peekTimer = window.setTimeout(() => {
+      peekTimer = null;
+      peek = true;
+      State.notify();
+    }, PEEK_AFTER_MS);
+  });
+  rightCol.addEventListener("mouseleave", () => {
+    clearPeekTimer();
+    if (!peek) return;
+    peekTimer = window.setTimeout(() => {
+      peekTimer = null;
+      peek = false;
+      State.notify();
+    }, UNPEEK_AFTER_MS);
+  });
+  // A folded island starts wide again.
+  State.subscribe(() => {
+    if (peek && State.mode !== "expanded") {
+      clearPeekTimer();
+      peek = false;
+    }
+  });
 
   let pillIds = "";
   let detailOpen = false;
   let lastFocus: string | null = null;
-  let mode: "ticker" | "card" | "plan" | "diff" | "spotify" | "sessions" | "whatsapp" | "mail" | "notifs" | "media" | null = null;
+  let mode: "ticker" | "card" | "plan" | "diff" | "spotify" | "sessions" | "whatsapp" | "mail" | "notifs" | "phone" | "media" | null = null;
   let cardKey = "";
   /** The list row highlighted at the last sync, to scroll only when it moves. */
   let shownSelection: number | null = null;
@@ -451,6 +490,15 @@ function buildOverview(actions: ViewActions): ViewHost {
           cardKey = "";
         }
         notifCard.sync(task);
+      } else if (task && task.id === PHONE_ID) {
+        // The phone's notifications (Phone Link): the same big card, its own Mochi.
+        if (mode !== "phone") {
+          clear(leftBody);
+          leftBody.append(phoneCard.el);
+          mode = "phone";
+          cardKey = "";
+        }
+        phoneCard.sync(task);
       } else if (task && task.id === MEDIA_ID) {
         // Its own wide card, the twin of Spotify's: now playing, or nothing playing.
         if (mode !== "media") {
@@ -495,10 +543,12 @@ function buildOverview(actions: ViewActions): ViewHost {
       // Spotify in front: its card takes the left card's whole width and the pills
       // fold into the slim rail (style.css, ".overview.sp"), animated in one move.
       // Its art already opens Spotify, so the ↗ button gives way.
-      const wide = mode === "spotify" || mode === "sessions" || mode === "notifs" ||
-        (mode === "media" && Media.state.present);
-      el.classList.toggle("sp", wide);
-      jump.style.display = detailOpen || mode === "plan" || mode === "diff" || wide ? "none" : "";
+      // Since 25/11 every main card is wide, whatever it is; half only while the rail is hovered.
+      const ownCard = mode === "spotify" || mode === "sessions" || mode === "notifs" || mode === "phone" ||
+        mode === "media";
+      el.classList.toggle("sp", !peek);
+      el.classList.toggle("peek", peek);
+      jump.style.display = detailOpen || mode === "plan" || mode === "diff" || ownCard ? "none" : "";
 
       // Ctrl+↓ Ctrl+↑ walk the open GitHub list (cardItemCount / cardSelection).
       const rows = mode === "card" ? listRows(leftBody) : [];

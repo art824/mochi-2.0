@@ -4651,3 +4651,200 @@ html[data-dir="rtl"] #views :is(.bubble, .reply .md-p, .reply .md-h, .reply .md-
   padding: 1px 9px;
   font-size: 11px;
 }
+
+/* ── Notifications, big (views/notifications.ts, 25/11) ───────────────────────
+   The newest notification takes the card: app and age on top, who in big type, the whole text
+   underneath (a long one scrolls). Earlier ones are chips at the bottom; a click brings one up. */
+
+.nt-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 0 2px;
+}
+
+.nt-hero.in {
+  animation: nt-rise 0.36s cubic-bezier(0.25, 1, 0.4, 1);
+}
+
+@keyframes nt-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.nt-hero-top {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 20px;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.nt-hero-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--nt-accent, #fff) 60%, transparent);
+}
+
+.nt-hero-app {
+  font: 500 11px var(--font);
+  color: var(--dim-2);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.nt-hero-ago {
+  margin-left: auto;
+  font: 400 11px var(--font);
+  color: var(--dim-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.nt-hero-title {
+  font: 600 14px/18px var(--font);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.nt-hero-body {
+  font: 400 12.5px/1.4 var(--font);
+  color: color-mix(in srgb, var(--ink) 82%, transparent);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+}
+
+.nt-chips {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 0 0 7px;
+  min-width: 0;
+  max-height: 30px;
+  overflow: hidden;
+  transition: max-height 0.3s cubic-bezier(0.25, 1, 0.4, 1), opacity 0.2s ease-in-out, padding 0.3s ease;
+}
+
+/* Reading: the chips step aside, the text takes the card. */
+.nt.reading .nt-chips {
+  max-height: 0;
+  opacity: 0;
+  padding-bottom: 0;
+}
+
+.nt.reading .nt-hero-body {
+  color: var(--ink);
+}
+
+.nt-chip {
+  all: unset;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  min-width: 0;
+  flex: 0 1 auto;
+  cursor: pointer;
+  transition: background 0.18s ease-in-out;
+}
+
+.nt-chip:hover {
+  background: color-mix(in srgb, var(--ink) 14%, transparent);
+}
+
+.nt-chip .dot {
+  flex: 0 0 auto;
+}
+
+.nt-chip-title {
+  font: 500 11px var(--font);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.nt-chip-ago {
+  font: 400 10px var(--font);
+  color: var(--dim-3);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+/* ── Main card always wide; half only while the rail is hovered (views.ts, 25/11) ──
+   Hovering the other pills for a moment opens them to half (labels back) and the main card
+   becomes half too. The wide-only cards get a half layout for that moment. */
+
+.overview:not(.sp) .nt,
+.overview:not(.sp) .ss {
+  width: 320px;
+}
+
+.overview:not(.sp) .nt-chip-ago {
+  display: none;
+}
+
+/* Spotify's and Media's card at half (rail hovered, 25/11): the cover steps aside, the title on top,
+   the bar, then the buttons; shuffle, repeat and the volume wait for the wide card. */
+.np-art,
+.np-text,
+.np-progress,
+.np-transport,
+.np-extra {
+  transition: left 0.42s cubic-bezier(0.25, 1, 0.4, 1), top 0.42s cubic-bezier(0.25, 1, 0.4, 1),
+    width 0.42s cubic-bezier(0.25, 1, 0.4, 1), opacity 0.25s ease-in-out;
+}
+
+.overview:not(.sp) .np-wide {
+  width: 320px;
+}
+
+.overview:not(.sp) .np-art,
+.overview:not(.sp) .np-extra {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.overview:not(.sp) .np-text {
+  left: 108px;
+  width: 196px;
+}
+
+.overview:not(.sp) .np-progress {
+  left: 108px;
+  top: 58px;
+  width: 196px;
+}
+
+.overview:not(.sp) .np-transport {
+  left: 152px;
+  top: 70px;
+}
+
+/* Claude's card at half: the selected session only; the list of the others waits for the wide card. */
+.ss-list {
+  transition: opacity 0.25s ease-in-out;
+}
+
+.overview:not(.sp) .ss-list {
+  display: none;
+}
