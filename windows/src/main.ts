@@ -147,6 +147,26 @@ async function main() {
     }
   });
 
+  // Chrome mode, remembered from last time: hang below the tab strip again.
+  if (State.detached) island.syncDetached(false);
+
+  // Hold-to-hide key (Rust sends true on press, false on release): the island
+  // fades out and the window lets every click through while it is down. A
+  // missed release can't leave it gone for good: it comes back after a minute.
+  let veilTimer: number | null = null;
+  await onEvent<boolean>("island-veil", (down) => {
+    if (down === document.body.classList.contains("veiled")) return;
+    document.body.classList.toggle("veiled", down);
+    void Bridge.setVeil(down);
+    if (veilTimer != null) window.clearTimeout(veilTimer);
+    veilTimer = down
+      ? window.setTimeout(() => {
+          document.body.classList.remove("veiled");
+          void Bridge.setVeil(false);
+        }, 60_000)
+      : null;
+  });
+
   // Settings → Reload sounds: read the sounds folder again, and let them hear it.
   await onEvent<null>("sounds-changed", () => {
     void Sound.reload().then(() => Sound.play("pop"));

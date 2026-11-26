@@ -454,6 +454,85 @@ body {
   color: var(--ink);
 }
 
+/* Header layout (Arthur, 26/11): ✕ centred over the notch, the right side in
+   groups with a hairline between them instead of one long row. */
+#header {
+  position: relative;
+}
+.header-actions {
+  align-items: center;
+}
+/* A little more air between the three families of buttons, no lines. */
+.header-actions button.gap-before {
+  margin-left: 8px;
+}
+/* Chat / drop / new session wait behind ⋯ and slide out, smoothly. */
+.tabs-more {
+  display: flex;
+  gap: 5px;
+  overflow: hidden;
+  max-width: 0;
+  opacity: 0;
+  margin-right: -5px;
+  transition: max-width 0.38s cubic-bezier(0.3, 1.1, 0.4, 1), opacity 0.22s ease-in-out, margin-right 0.38s cubic-bezier(0.3, 1.1, 0.4, 1);
+}
+.tabs-more.open {
+  max-width: 200px;
+  opacity: 1;
+  margin-right: 0;
+}
+/* The ✕ hangs from the top edge as a bell curve, about as wide as the wake
+   strip's centre: flat tails melting into the top, a round belly down in the
+   middle (Arthur's drawing, 26/11). clip-path keeps clicks inside the curve. */
+.header-actions button.close {
+  position: absolute;
+  left: 50%;
+  top: calc(var(--drip-top, -8px) - 6px);
+  width: 140px;
+  height: 32px;
+  padding: 6px 0;
+  color: var(--dim-2);
+  clip-path: path("M0 0V6C34 6 42 32 70 32S106 6 140 6V0Z");
+  transform: translateX(-50%);
+  transition: color 0.2s ease-in-out, transform 0.3s cubic-bezier(0.3, 1.2, 0.4, 1);
+}
+.header-actions button.close .bell {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.header-actions button.close .bell path {
+  fill: rgba(255, 255, 255, 0.08);
+  transition: fill 0.2s ease-in-out;
+}
+.header-actions button.close svg:not(.bell) {
+  position: relative;
+}
+.header-actions button.close:hover {
+  color: var(--ink);
+  transform: translate(-50%, 2px);
+}
+.header-actions button.close:hover .bell path {
+  fill: rgba(255, 255, 255, 0.16);
+}
+
+/* Chrome mode button: the arrow drops a little when the island is detached. */
+.header-actions button.detach svg {
+  transition: transform 0.35s cubic-bezier(0.3, 1.2, 0.4, 1);
+}
+.header-actions button.detach.on svg {
+  transform: translateY(2px);
+}
+
+/* Hold-to-hide key down: the island fades out (Rust lets the clicks through). */
+#root {
+  transition: opacity 0.16s ease-in-out;
+}
+body.veiled #root {
+  opacity: 0;
+}
+
 /* The pin: tilted and dim while the island may fold, upright and lit when it
    is kept open. Same spring and fades as the rest of the header. */
 .header-actions button.pin svg {
@@ -4847,4 +4926,167 @@ html[data-dir="rtl"] #views :is(.bubble, .reply .md-p, .reply .md-h, .reply .md-
 
 .overview:not(.sp) .ss-list {
   display: none;
+}
+
+/* ── Animation level-up (Arthur, 26/11) ─────────────────────────────────────
+   Springs, cascades and small reactions on the header, the new buttons, the
+   media controls and the mini Mochis. Everything is off with reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  /* ⋯ menu: the buttons pop out one after another with a little bounce. */
+  .tabs-more > * {
+    opacity: 0;
+    transform: translateX(-10px) scale(0.6);
+    transition: transform 0.42s cubic-bezier(0.3, 1.5, 0.4, 1), opacity 0.2s ease-out;
+  }
+  .tabs-more.open > * {
+    opacity: 1;
+    transform: none;
+  }
+  .tabs-more.open > :nth-child(1) { transition-delay: 0.04s; }
+  .tabs-more.open > :nth-child(2) { transition-delay: 0.09s; }
+  .tabs-more.open > :nth-child(3) { transition-delay: 0.14s; }
+  .tabs-more.open > :nth-child(4) { transition-delay: 0.19s; }
+  .tabs-more.open > :nth-child(5) { transition-delay: 0.24s; }
+  /* ⋯ turns into the arrow (and back) with a quarter turn. */
+  @keyframes more-spin-in { from { transform: rotate(-90deg) scale(0.5); opacity: 0; } to { transform: none; opacity: 1; } }
+  @keyframes more-spin-out { from { transform: rotate(90deg) scale(0.5); opacity: 0; } to { transform: none; opacity: 1; } }
+  .tab.more svg.spin-in { animation: more-spin-in 0.38s cubic-bezier(0.3, 1.4, 0.4, 1); }
+  .tab.more svg.spin-out { animation: more-spin-out 0.38s cubic-bezier(0.3, 1.4, 0.4, 1); }
+
+  /* Header buttons: lift on hover, squash on press, spring back. */
+  .tab,
+  .header-actions button:not(.close) {
+    transition: transform 0.28s cubic-bezier(0.3, 1.5, 0.4, 1), background 0.18s ease-in-out, color 0.18s ease-in-out;
+  }
+  .tab:hover,
+  .header-actions button:not(.close):hover {
+    transform: translateY(-1px) scale(1.1);
+  }
+  .tab:active,
+  .header-actions button:not(.close):active {
+    transform: scale(0.88);
+    transition-duration: 0.08s;
+  }
+  /* The island opening: header buttons rise in, in sequence. */
+  @keyframes hdr-rise { from { opacity: 0; transform: translateY(8px) scale(0.8); } to { opacity: 1; transform: none; } }
+  #header.enter .tabs > .tab,
+  #header.enter .header-actions > * {
+    animation: hdr-rise 0.5s cubic-bezier(0.3, 1.4, 0.4, 1) backwards;
+  }
+  #header.enter .tabs > :nth-child(2) { animation-delay: 0.05s; }
+  #header.enter .tabs > :nth-child(4) { animation-delay: 0.1s; }
+  #header.enter .header-actions > :nth-last-child(6) { animation-delay: 0.1s; }
+  #header.enter .header-actions > :nth-last-child(5) { animation-delay: 0.14s; }
+  #header.enter .header-actions > :nth-last-child(4) { animation-delay: 0.18s; }
+  #header.enter .header-actions > :nth-last-child(3) { animation-delay: 0.22s; }
+  #header.enter .header-actions > :nth-last-child(2) { animation-delay: 0.26s; }
+  #header.enter .header-actions > :nth-last-child(1) { animation-delay: 0.3s; }
+
+  /* The bell: drips lower on hover, the ✕ turns a quarter, a click dips it. */
+  .header-actions button.close {
+    transition: color 0.2s ease-in-out, transform 0.45s cubic-bezier(0.3, 1.6, 0.4, 1);
+  }
+  .header-actions button.close:hover {
+    transform: translate(-50%, 4px);
+  }
+  .header-actions button.close:active {
+    transform: translate(-50%, 7px) scaleY(0.94);
+    transition-duration: 0.09s;
+  }
+  .header-actions button.close svg:not(.bell) {
+    transition: transform 0.45s cubic-bezier(0.3, 1.6, 0.4, 1);
+  }
+  .header-actions button.close:hover svg:not(.bell) {
+    transform: rotate(90deg);
+  }
+
+  /* Chrome mode: the arrow bounces on click; the detached island floats. */
+  .header-actions button.detach:active svg {
+    transform: translateY(5px);
+    transition-duration: 0.08s;
+  }
+  #island {
+    transition: filter 0.5s ease-in-out;
+  }
+  #island.detached {
+    filter: drop-shadow(0 8px 14px rgba(0, 0, 0, 0.55));
+  }
+
+  /* Hold to hide: shrinks away while the key is down, springs back on release. */
+  #root {
+    transform-origin: 50% 0;
+    transition: opacity 0.22s ease-in-out, transform 0.5s cubic-bezier(0.3, 1.5, 0.4, 1);
+  }
+  body.veiled #root {
+    transform: scale(0.94) translateY(-6px);
+    transition: opacity 0.16s ease-in-out, transform 0.22s ease-in;
+  }
+
+  /* Media: the bars thicken under the pointer, the controls grow. */
+  .np-bar:hover .np-track,
+  .np-bar:hover .np-fill {
+    height: 7px;
+  }
+  .np-track {
+    transition: height 0.18s cubic-bezier(0.3, 1.4, 0.4, 1);
+  }
+  .np-fill {
+    transition: width 0.5s linear, height 0.18s cubic-bezier(0.3, 1.4, 0.4, 1);
+  }
+  .np-skip:hover,
+  .np-icon:hover {
+    transform: scale(1.18);
+  }
+  .np-play:hover {
+    transform: scale(1.12);
+  }
+  .np-skip:active,
+  .np-icon:active {
+    transform: scale(0.82);
+  }
+  .np-play:active {
+    transform: scale(0.86);
+  }
+
+  /* Mini Mochis: grow under the pointer, bounce on click. */
+  .pill .mini {
+    transition: scale 0.3s cubic-bezier(0.3, 1.6, 0.4, 1);
+  }
+  .pill:hover .mini {
+    scale: 1.14;
+  }
+  .pill:active .mini {
+    scale: 0.88;
+    transition-duration: 0.08s;
+  }
+}
+
+/* The current view's tab: one pill that glides between the buttons. */
+.tabs {
+  position: relative;
+}
+.tab-slider {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: 22px;
+  margin-top: -11px;
+  width: 30px;
+  border-radius: 11px;
+  background: var(--tab-on);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 0.38s cubic-bezier(0.3, 1.35, 0.4, 1), width 0.38s cubic-bezier(0.3, 1.35, 0.4, 1), opacity 0.2s ease-in-out;
+}
+.tab-slider.shown {
+  opacity: 1;
+}
+.tabs .tab.on:not(.more) {
+  background: transparent;
+  position: relative;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tab-slider {
+    transition: opacity 0.2s;
+  }
 }

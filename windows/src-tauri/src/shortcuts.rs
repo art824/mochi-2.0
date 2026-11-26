@@ -69,6 +69,11 @@ pub const ACTIONS: &[ActionDef] = &[
     action("muteToggle", "Ctrl+Alt+S", true, true),
     action("desktopToggle", "Ctrl+Alt+D", true, true),
     action("wardrobeToggle", "Ctrl+Alt+G", true, true),
+    // Not on the Mac (Mochi 2.0): hold it and the island vanishes and lets the
+    // mouse through, so what lies behind a pinned island can be seen and clicked.
+    // Alt+Q: two keys, the left hand reaches both, and Windows gives it no job
+    // (Ctrl+' / Ctrl+` open the terminal in editors; Ctrl+Alt+letter is AltGr).
+    action("holdHide", "Alt+Q", true, true),
 ];
 
 pub fn find(id: &str) -> Option<&'static ActionDef> {
@@ -92,6 +97,7 @@ pub fn description(id: &str) -> &'static str {
         "muteToggle" => n_("Mute or unmute Mochi"),
         "desktopToggle" => n_("Send Mochi to the desktop"),
         "wardrobeToggle" => n_("Open the wardrobe"),
+        "holdHide" => n_("Hold to hide the island"),
         _ => "Coucou",
     }
 }
@@ -303,18 +309,32 @@ pub fn from_args(args: &[String]) -> Option<&'static str> {
 
 // ── Registration ──────────────────────────────────────────────────────────────
 
+/// The hold-to-hide key is down right now (see `plugin`).
+static HIDE_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The plugin, with every press routed through `dispatch`.
 pub fn plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
     tauri_plugin_global_shortcut::Builder::new()
         .with_handler(|app, shortcut, event| {
+            let Some(registry) = app.try_state::<Registry>() else { return };
+            let action = registry.by_id.lock().unwrap().get(&shortcut.id()).copied();
+            let Some(action) = action else { return };
+            // The one action that cares about the release too: held, the
+            // island is veiled; let go and it is back. Key repeat just says
+            // "down" again, which the page ignores.
+            if action == "holdHide" {
+                let down = event.state == ShortcutState::Pressed;
+                // Key repeat says "down" over and over: log only the changes.
+                if HIDE_HELD.swap(down, std::sync::atomic::Ordering::Relaxed) != down {
+                    crate::log::line(format!("shortcut holdHide {}", if down { "down" } else { "up" }));
+                }
+                let _ = app.emit_to(WINDOW_LABEL, "island-veil", down);
+                return;
+            }
             if event.state != ShortcutState::Pressed {
                 return;
             }
-            let Some(registry) = app.try_state::<Registry>() else { return };
-            let action = registry.by_id.lock().unwrap().get(&shortcut.id()).copied();
-            if let Some(action) = action {
-                dispatch(app, action);
-            }
+            dispatch(app, action);
         })
         .build()
 }
@@ -383,6 +403,8 @@ pub fn apply<R: Runtime>(app: &AppHandle<R>, stored: &Bindings) {
                 ActionStatus { id: def.id, status, typed: None, trigger: None }
             }
         };
+        // What each key came to: a shortcut that does nothing is otherwise silent.
+        crate::log::line(format!("shortcuts: {} = {} -> {:?}", def.id, effective(def, stored).keys, status.status));
         report.push(status);
     }
 
@@ -688,9 +710,9 @@ mod wayland {
 mod tests {
     use super::*;
 
-    const MAC_IDS: [&str; 10] = [
+    const MAC_IDS: [&str; 11] = [
         "toggleIsland", "openChat", "goToAlert", "jumpToTerminal", "attachFrontWindow",
-        "nextPill", "prevPill", "muteToggle", "desktopToggle", "wardrobeToggle",
+        "nextPill", "prevPill", "muteToggle", "desktopToggle", "wardrobeToggle", "holdHide",
     ];
 
     fn never(_: &Shortcut) -> Option<String> {

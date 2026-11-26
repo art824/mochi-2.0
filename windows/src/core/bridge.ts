@@ -223,6 +223,12 @@ export const Bridge = {
   setIslandRect: (x: number, y: number, width: number, height: number) =>
     call<void>("set_island_rect", { x, y, width, height }),
 
+  /** Hold-to-hide: while the key is down the island takes no mouse at all. */
+  setVeil: (on: boolean) => call<void>("set_veil", { on }),
+
+  /** Chrome mode: hang the island `offset` px below the top edge (0 = attached). */
+  setDetached: (offset: number) => call<void>("set_detached", { offset }),
+
   /** Give the window keyboard focus (chat field) and take it away again. */
   focusWindow: (focused: boolean) => call<void>("focus_window", { focused }),
 

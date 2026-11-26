@@ -16,7 +16,7 @@ import { DEFAULT_SETTINGS, State } from "../src/core/state.ts";
 
 const MAC_IDS = [
   "toggleIsland", "openChat", "goToAlert", "jumpToTerminal", "attachFrontWindow",
-  "nextPill", "prevPill", "muteToggle", "desktopToggle", "wardrobeToggle",
+  "nextPill", "prevPill", "muteToggle", "desktopToggle", "wardrobeToggle", "holdHide",
 ];
 
 // ── Defaults (testDefaultsExhaustive, testAllDefaultsHaveModifier, testNoDefaultDuplicates) ──
@@ -80,7 +80,7 @@ test("only the island toggle is off by default; the one not ported yet is reserv
   }
   assert.deepEqual(activeKeys({}).map(([id]) => id), [
     "openChat", "goToAlert", "jumpToTerminal", "nextPill", "prevPill", "muteToggle", "desktopToggle",
-    "wardrobeToggle",
+    "wardrobeToggle", "holdHide",
   ]);
   // The Mac's ⌃⌥D, on the same letter.
   assert.equal(SHORTCUTS.find((d) => d.id === "desktopToggle").defaultKeys, "Ctrl+Alt+D");
@@ -470,7 +470,7 @@ test("the desktop shortcut arrives like the others, and runs from the command li
 });
 
 test("actions that aren't the island's do nothing here", () => {
-  for (const id of ["wardrobeToggle", "attachFrontWindow", "nonsense"]) {
+  for (const id of ["wardrobeToggle", "holdHide", "attachFrontWindow", "nonsense"]) {
     runGlobalShortcut(host, id, resume);
   }
   assert.deepEqual(did, []);

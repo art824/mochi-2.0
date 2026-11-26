@@ -101,8 +101,9 @@ function showsAlert(pill: string, focused: boolean): boolean {
   return true;
 }
 
-export function restoreAlertFocus(): void {
-  if (!focusBeforeAlert) return;
+/** True when the focus went back to the pill you had. */
+export function restoreAlertFocus(): boolean {
+  if (!focusBeforeAlert) return false;
   const prev = focusBeforeAlert;
   const borrowed = alertPill;
   focusBeforeAlert = null;
@@ -114,7 +115,9 @@ export function restoreAlertFocus(): void {
     State.tasks.some((t) => t.id === prev)
   ) {
     State.setFocus(prev);
+    return true;
   }
+  return false;
 }
 
 /** Events after which a pending permission request of the same session is moot. */

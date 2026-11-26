@@ -5,7 +5,7 @@
 // centre of the main display inside a borderless, transparent, always-on-top
 // window that never takes focus.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -23,6 +23,11 @@ pub const STRIP_W: f64 = 240.0;
 pub const STRIP_H: f64 = 14.0;
 
 pub const WINDOW_LABEL: &str = "island";
+
+/// "Detached" (Chrome mode): how far below the top of the screen the island
+/// sits, in logical px, so a browser's tab strip stays visible and clickable.
+/// 0 = attached to the top edge as always.
+pub static DETACH_Y: AtomicI32 = AtomicI32::new(0);
 
 /// Around the window, how far the cursor is still worth telling the page
 /// about (Mochi's eyes follow it), in logical px. Past it the page hears once
@@ -78,6 +83,8 @@ pub struct PollGate {
     pub rect: Mutex<IslandRect>,
     /// Mirrors the window flag so we only call into the OS when it changes.
     ignoring: AtomicBool,
+    /// The hold-to-hide key is down: the island lets every click through.
+    pub veil: AtomicBool,
 }
 
 impl PollGate {
@@ -89,6 +96,17 @@ impl PollGate {
             collapsed_size: Mutex::new((STRIP_W, STRIP_H)),
             rect: Mutex::new(IslandRect::default()),
             ignoring: AtomicBool::new(false),
+            veil: AtomicBool::new(false),
+        }
+    }
+
+    /// Veiled: the window takes no mouse at all (and the page fades itself out).
+    /// Let go: it takes the mouse again and the next poll tick settles it.
+    pub fn set_veil(&self, app: &AppHandle, on: bool) {
+        self.veil.store(on, Ordering::Relaxed);
+        self.ignoring.store(on, Ordering::Relaxed);
+        if let Some(win) = window(app) {
+            platform::set_click_through(&win, on);
         }
     }
 
@@ -437,7 +455,7 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: Option<(f64, f64)>
     let pw = (lw * scale).round().max(1.0) as u32;
     let ph = (lh * scale).round().max(1.0) as u32;
     let x = mp.x + (ms.width as i32 - pw as i32) / 2;
-    let y = mp.y + top_inset(&m);
+    let y = mp.y + top_inset(&m) + (DETACH_Y.load(Ordering::Relaxed) as f64 * scale).round() as i32;
 
     // GTK never sizes a non-resizable window below its natural size (200 px
     // here), so on Linux the 6 px wake strip would stay a 200 px block. tao
@@ -586,7 +604,7 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                     && y >= 0.0
                     && y <= size.1;
 
-                let accept = on_island || dragging;
+                let accept = (on_island || dragging) && !gate.veil.load(Ordering::Relaxed);
                 if gate.ignoring.load(Ordering::Relaxed) == accept {
                     // Under the gate's lock, and only while it is open: a tick
                     // still running as the island folds must not make the
@@ -633,8 +651,11 @@ fn wake_if_hovered(app: &AppHandle, gate: &PollGate) {
 /// the island itself, or to the whole wake strip while collapsed.
 pub fn refresh_click_through(app: &AppHandle, gate: &PollGate) {
     if platform::CURSOR_POLL {
-        set_ignore_cursor(app, false);
-        gate.forget_ignore_state();
+        // Held-down hide key: the window stays click-through whatever resized.
+        if !gate.veil.load(Ordering::Relaxed) {
+            set_ignore_cursor(app, false);
+            gate.forget_ignore_state();
+        }
         return;
     }
     let Some(win) = window(app) else { return };

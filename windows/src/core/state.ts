@@ -278,6 +278,26 @@ class AppState {
       /* no storage: it just won't be remembered */
     }
   }
+  /**
+   * Chrome mode: the island hangs a little below the top edge, under a
+   * browser's tab strip, so the tabs stay visible and clickable (Arthur, 26/11).
+   * Kept between runs; the page works without storage.
+   */
+  detached = (() => {
+    try {
+      return localStorage.getItem("coucou.detached") === "1";
+    } catch {
+      return false;
+    }
+  })();
+  setDetached(on: boolean) {
+    this.detached = on;
+    try {
+      localStorage.setItem("coucou.detached", on ? "1" : "0");
+    } catch {
+      /* no storage: it just won't be remembered */
+    }
+  }
   /** A call is being recorded by the Notetaker (the header button lights up). */
   noteRecording = false;
   paused = false;

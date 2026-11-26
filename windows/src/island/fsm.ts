@@ -33,7 +33,7 @@ export class IslandStateMachine {
   /** Seconds the pointer must rest on the folded strip before the island shows. */
   revealHoverDelay = 1.4;
   /** In strict mode: seconds the compact island stays once the pointer is off it. */
-  strictPetitDelay = 2; // was 5: Arthur wanted it "very smaller" (23/11)
+  strictPetitDelay = 1.4; // was 5, then 2 (23/11); 30% shorter again (26/11)
   /** In strict mode: seconds a notice stays on screen when nobody hovers it. */
   strictNoticeDelay = 8;
   /** coucou → petit once the greeting animation ends (no hover). */

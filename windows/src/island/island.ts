@@ -64,6 +64,9 @@ const PRE_PROGRESS = USC.T_PROG_START - USC.T_DROP;
  */
 const ALWAYS_HIDE = true;
 
+/** Chrome mode: logical px the island hangs below the top edge, enough to clear a browser's tab strip. */
+export const DETACH_PX = 42;
+
 const modeOrder = (m: IslandMode) => (m === "hidden" ? 0 : m === "compact" ? 1 : 2);
 
 export class Island {
@@ -112,6 +115,11 @@ export class Island {
   private width = new Tracked(NOTCH_W);
   private height = new Tracked(0);
   private radius = new Tracked(ROUNDED_CORNER);
+  /** Top corners: square against the screen edge, rounded once the island is detached (Chrome mode). */
+  private topRadius = new Tracked(State.detached ? ROUNDED_CORNER : 0);
+  /** Where the detached window is now, px below the top edge, while it glides to its place. */
+  private detachY = 0;
+  private detachRaf = 0;
   private botCx = new Spring(46);
   private botCy = new Spring(16);
   private botSize = new Spring(10);
@@ -246,6 +254,12 @@ export class Island {
       toggleSubtle: () => {
         Sound.play("blip");
         State.setSubtle(!State.subtle);
+        State.notify();
+      },
+      toggleDetach: () => {
+        Sound.play("blip");
+        State.setDetached(!State.detached);
+        this.syncDetached(true);
         State.notify();
       },
       foldApproval: () => this.foldApproval(),
@@ -731,14 +745,27 @@ export class Island {
     // overlay must never sit on top of it, nor keep the island pinned.
     if (mode === "expanded") this.dictEnd();
     this.syncRec();
-    if (mode === "expanded") Sound.play("open");
+    if (mode === "expanded") {
+      Sound.play("open");
+      // Header buttons rise in one after another each time the island opens.
+      const hd = this.header.el;
+      hd.classList.remove("enter");
+      void hd.offsetWidth;
+      hd.classList.add("enter");
+      window.setTimeout(() => hd.classList.remove("enter"), 900);
+    }
     if (prev === "expanded") {
       Sound.play("close");
       // A folded card is still waiting: it keeps the island pinned.
       if (!State.pendingApproval) State.isPinned = false;
       void Bridge.focusWindow(false);
       // Another pill's alert borrowed the front: the pill you had comes back (Mac).
-      restoreAlertFocus();
+      // The alert's card (finished / error) belonged to that borrowed pill: it
+      // goes with it. Left on screen it would reopen as the media pill saying
+      // "Claude Code finished" (Arthur, 26/11).
+      if (restoreAlertFocus() && (State.view === "finished" || State.view === "error")) {
+        State.view = State.defaultView();
+      }
     }
     if (mode !== "expanded") {
       closePlanCard();
@@ -830,6 +857,10 @@ export class Island {
     // back left it thinking the island was still open, and a click on the compact
     // island then did nothing — the island could never be reopened.
     this.fsm.forcePetit();
+    // The pointer is still on the island after the ✕ (now over the notch), so no
+    // "mouse left" ever arms the countdown: start it here or the small island
+    // would stay until the pointer moved away.
+    this.fsm.fold(this.fsm.strictPetitDelay);
   }
 
   /** Alert from the hook server: open on this view. Pinned alerts never auto-close. */
@@ -1217,16 +1248,48 @@ export class Island {
       this.height.springTo(h);
       this.radius.springTo(r);
     }
+    // Detached, the island no longer touches the edge: its top corners round off too.
+    this.topRadius.springTo(State.detached ? r : 0);
     this.ensureRunning();
+  }
+
+  /**
+   * Chrome mode: glides the window to its place below (or back to) the top
+   * edge, and rounds or squares the top corners with it (Arthur, 26/11).
+   * `animate` is false at start-up, where it simply is there.
+   */
+  syncDetached(animate: boolean) {
+    const to = State.detached ? DETACH_PX : 0;
+    this.islandEl.classList.toggle("detached", State.detached);
+    window.cancelAnimationFrame(this.detachRaf);
+    this.animateGeometry(false);
+    if (!animate) {
+      this.detachY = to;
+      void Bridge.setDetached(to);
+      return;
+    }
+    const from = this.detachY;
+    const t0 = performance.now();
+    const step = (now: number) => {
+      const k = Math.min(1, (now - t0) / 520);
+      // ease-out-back: passes the mark a little and settles, like the springs.
+      const c = 1.9;
+      const e = 1 + (c + 1) * Math.pow(k - 1, 3) + c * Math.pow(k - 1, 2);
+      this.detachY = Math.max(0, from + (to - from) * e);
+      void Bridge.setDetached(this.detachY);
+      if (k < 1) this.detachRaf = window.requestAnimationFrame(step);
+    };
+    this.detachRaf = window.requestAnimationFrame(step);
   }
 
   private applyGeometry() {
     const w = this.width.value;
     const hh = this.height.value;
     const r = this.radius.value;
+    const tr = this.topRadius.value;
     this.islandEl.style.width = `${w}px`;
     this.islandEl.style.height = `${hh}px`;
-    this.islandEl.style.borderRadius = `0 0 ${r}px ${r}px`;
+    this.islandEl.style.borderRadius = `${tr}px ${tr}px ${r}px ${r}px`;
     this.islandEl.style.transform = `translateX(-50%)`;
     // These follow the island as it resizes, so they belong here rather than in
     // the state-driven DOM sync.
@@ -1616,6 +1679,7 @@ export class Island {
     this.width.step(dt, nowMs);
     this.height.step(dt, nowMs);
     this.radius.step(dt, nowMs);
+    this.topRadius.step(dt, nowMs);
     this.applyGeometry();
 
     if (this.dirty) {
@@ -1668,7 +1732,7 @@ export class Island {
     // sweep — so a hidden island went on burning frames in exactly the states it
     // spends most of its life in. Geometry still has to finish retracting.
     const settling =
-      this.width.animating || this.height.animating || this.radius.animating;
+      this.width.animating || this.height.animating || this.radius.animating || this.topRadius.animating;
     const botMoving = !this.botCx.settled || !this.botCy.settled || !this.botSize.settled;
     // Closed, only the folding — and Mochi reaching his place in the closed island.
     const busy = State.mode === "hidden"

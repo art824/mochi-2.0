@@ -196,6 +196,24 @@ fn set_collapsed(app: AppHandle, shared: State<Shared>, collapsed: bool, width: 
     platform::set_pointer_watch(!collapsed);
 }
 
+/// The hold-to-hide key went down (true) or up: the island lets the mouse through.
+#[tauri::command]
+fn set_veil(app: AppHandle, shared: State<Shared>, on: bool) {
+    shared.gate.set_veil(&app, on);
+}
+
+/// Chrome mode: the island hangs `offset` logical px below the top edge (0 = attached).
+#[tauri::command]
+fn set_detached(app: AppHandle, shared: State<Shared>, offset: f64) {
+    let px = if offset.is_finite() { offset.clamp(0.0, 120.0).round() as i32 } else { 0 };
+    island::DETACH_Y.store(px, Ordering::Relaxed);
+    let pref = shared.settings.lock().unwrap().screen.clone();
+    let collapsed = shared.gate.collapsed.load(Ordering::Relaxed);
+    let size = *shared.gate.collapsed_size.lock().unwrap();
+    island::apply_geometry(&app, &pref, collapsed.then_some(size));
+    island::refresh_click_through(&app, &shared.gate);
+}
+
 /// The front end pushes the island shape; Rust decides click-through from it.
 #[tauri::command]
 fn set_island_rect(app: AppHandle, shared: State<Shared>, x: f64, y: f64, width: f64, height: f64) {
@@ -927,6 +945,8 @@ pub fn run() {
             set_system_languages,
             set_collapsed,
             set_island_rect,
+            set_veil,
+            set_detached,
             focus_window,
             reposition,
             fit_zoom,

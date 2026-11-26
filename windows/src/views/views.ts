@@ -51,6 +51,8 @@ export interface ViewActions {
   togglePin(): void;
   /** The header moon: subtle mode, where notices only show the compact island. */
   toggleSubtle(): void;
+  /** The header arrow: Chrome mode, the island hangs below the top edge (tab strip stays free). */
+  toggleDetach(): void;
   /** The header mic: starts a hands-free dictation (no key held). */
   startHandsFree(): void;
   /** The header record button: starts or stops recording a call (Notetaker). */
@@ -146,15 +148,33 @@ export function buildHeader(actions: ViewActions): ViewHost {
     svg(ICONS.terminal, 17, { stroke: 1.7 }),
   );
 
-  const gearBtn = h("button", { title: tl("Settings"), onclick: () => go("settings") }, svg(ICONS.gearLine, 18, { stroke: 1.6 }));
-  const soundBtn = h("button", { title: tl("Mute"), onclick: () => actions.toggleSound() }, svg(ICONS.speakerLine, 18, { stroke: 1.6 }));
+  // Sound and Settings wait behind the ⋯ too (Arthur, 26/11), so they look like its tabs.
+  const gearBtn = h("button", { class: "tab", title: tl("Settings"), onclick: () => go("settings") }, svg(ICONS.gearLine, 18, { stroke: 1.6 }));
+  const soundBtn = h("button", { class: "tab", title: tl("Mute"), onclick: () => actions.toggleSound() }, svg(ICONS.speakerLine, 18, { stroke: 1.6 }));
   const micBtn = h("button", { class: "mic", title: tl("Dictate hands-free"), onclick: () => actions.startHandsFree() }, svg(ICONS.micLine, 18, { stroke: 1.6 }));
   const recBtn = h("button", { class: "rec", title: tl("Record a call"), onclick: () => actions.toggleRecording() }, svg(ICONS.recordLine, 18, { stroke: 1.6 }));
   const pinBtn = h("button", { class: "pin", title: tl("Keep open"), onclick: () => actions.togglePin() }, svg(ICONS.pinLine, 18, { stroke: 1.6 }));
   const subtleBtn = h("button", { class: "subtle", title: tl("Subtle mode"), onclick: () => actions.toggleSubtle() }, svg(ICONS.moonLine, 18, { stroke: 1.6 }));
+  const detachBtn = h("button", { class: "detach", title: tl("Detach from the top (Chrome mode)"), onclick: () => actions.toggleDetach() }, svg(ICONS.detachLine, 18, { stroke: 1.6 }));
   // Folds back to the compact island now, without waiting for the timer (the
   // Mac's ✕). A card waiting for an answer keeps the island open: no ✕ then.
-  const closeBtn = h("button", { class: "close", title: tl("Close"), onclick: () => actions.close() }, svg(ICONS.xmark, 17));
+  const closeBtn = h("button", { class: "close", title: tl("Close"), onclick: () => actions.close() }, svg(ICONS.xmark, 15));
+  // The ✕ hangs from the top edge as a bell curve (Arthur, 26/11): the curve is
+  // its own SVG behind the icon, and clip-path keeps clicks inside the curve.
+  const bell = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  bell.setAttribute("class", "bell");
+  // 6 px taller than what shows: the top 6 px sit above the screen edge, so a
+  // click on the very first pixel row lands inside the shape, not on its outline.
+  bell.setAttribute("viewBox", "0 0 140 32");
+  bell.setAttribute("preserveAspectRatio", "none");
+  bell.setAttribute("aria-hidden", "true");
+  const bellPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  bellPath.setAttribute("d", "M0 0V6C34 6 42 32 70 32S106 6 140 6V0Z");
+  bell.append(bellPath);
+  closeBtn.prepend(bell);
+  // Chat, drop and new session are rarely used: they wait behind the ⋯ and slide out.
+  const moreBtn = h("button", { class: "tab more", title: tl("More"), onclick: () => { moreOpen = !moreOpen; applyMore(); } }, svg(ICONS.ellipsis, 17));
+  let moreOpen = false;
   // Plan usage pills (off by default): before the gear, Claude first, as on the Mac.
   const claudePill = buildPlanPill(false);
   const codexPill = buildPlanPill(true);
@@ -169,10 +189,65 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const el = h(
     "div",
     { id: "header" },
-    h("div", { class: "tabs" }, tabHome, tabChat, tabDrop, tabLaunch),
-    h("div", { class: "header-actions" }, planPills, micBtn, recBtn, subtleBtn, pinBtn, gearBtn, soundBtn, closeBtn),
+    // Left: Home, and ⋯ that slides out chat / drop / new session / sound / Settings.
+    h("div", { class: "tabs" }, tabHome, h("div", { class: "tabs-more" }, tabChat, tabDrop, tabLaunch, soundBtn, gearBtn), moreBtn),
+    // Centre: the ✕ bell over the notch. Right: what you reach for most —
+    // dictate and record, then how the island behaves (subtle, pin, detach).
+    h(
+      "div",
+      { class: "header-actions" },
+      planPills,
+      micBtn,
+      recBtn,
+      subtleBtn,
+      pinBtn,
+      detachBtn,
+      closeBtn,
+    ),
   );
   const headerActions = el.lastElementChild as HTMLElement;
+  // The highlight under the current view's tab is one pill that glides between
+  // buttons (the ⋯ menu is still sliding open while it goes, so it re-aims
+  // every frame for a little while).
+  const tabsEl = el.querySelector(".tabs") as HTMLElement;
+  const slider = h("span", { class: "tab-slider" });
+  tabsEl.prepend(slider);
+  let sliderRaf = 0;
+  function aimSlider() {
+    const on = tabsEl.querySelector(".tab.on:not(.more)") as HTMLElement | null;
+    slider.classList.toggle("shown", !!on);
+    if (on) {
+      slider.style.transform = `translateX(${on.offsetLeft}px)`;
+      slider.style.width = `${on.offsetWidth}px`;
+    }
+  }
+  function followSlider() {
+    window.cancelAnimationFrame(sliderRaf);
+    const t0 = performance.now();
+    const tick = (now: number) => {
+      aimSlider();
+      if (now - t0 < 650) sliderRaf = window.requestAnimationFrame(tick);
+    };
+    sliderRaf = window.requestAnimationFrame(tick);
+  }
+  const tabsMore = el.querySelector(".tabs-more") as HTMLElement;
+  subtleBtn.classList.add("gap-before");
+
+  /** Open when asked, or when the view on screen is one of the hidden ones. */
+  function applyMore() {
+    const hiddenViewOn = State.view === "prompt" || State.view === "upload" || State.view === "launch" || State.view === "settings";
+    const open = moreOpen || hiddenViewOn;
+    tabsMore.classList.toggle("open", open);
+    const changed = moreBtn.dataset.open !== String(open);
+    moreBtn.dataset.open = String(open);
+    moreBtn.classList.toggle("on", open);
+    if (changed) {
+      clear(moreBtn);
+      const ic = svg(open ? ICONS.chevronLeft : ICONS.ellipsis, 17);
+      ic.classList.add(open ? "spin-in" : "spin-out");
+      moreBtn.append(ic);
+    }
+  }
 
   return {
     el,
@@ -183,6 +258,8 @@ export function buildHeader(actions: ViewActions): ViewHost {
       tabDrop.classList.toggle("on", v === "upload");
       tabLaunch.classList.toggle("on", v === "launch");
       gearBtn.classList.toggle("on", v === "settings");
+      applyMore();
+      followSlider();
       clear(gearBtn);
       gearBtn.append(v === "settings" ? svg(ICONS.gearFill, 18) : svg(ICONS.gearLine, 18, { stroke: 1.6 }));
       clear(soundBtn);
@@ -190,6 +267,8 @@ export function buildHeader(actions: ViewActions): ViewHost {
       recBtn.classList.toggle("on", State.noteRecording);
       subtleBtn.classList.toggle("on", State.subtle);
       subtleBtn.setAttribute("aria-pressed", String(State.subtle));
+      detachBtn.classList.toggle("on", State.detached);
+      detachBtn.setAttribute("aria-pressed", String(State.detached));
       pinBtn.classList.toggle("on", State.isPinned);
       pinBtn.setAttribute("aria-pressed", String(State.isPinned));
       pinBtn.style.display = State.pendingApproval ? "none" : "";
