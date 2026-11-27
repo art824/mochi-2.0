@@ -900,6 +900,9 @@ pub fn layer_display(island: &WebviewWindow, mochi: &WebviewWindow) -> Option<(f
     Some((g.width() as f64, g.height() as f64))
 }
 
+/// Only Windows stacks always-on-top windows by when they were last raised.
+pub fn raise_on_top(_win: &WebviewWindow) {}
+
 /// Click-through on or off (Windows needs more; see platform/windows.rs).
 pub fn set_click_through(win: &WebviewWindow, ignore: bool) {
     let _ = win.set_ignore_cursor_events(ignore);

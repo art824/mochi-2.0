@@ -36,7 +36,7 @@ use ::windows::Win32::UI::Shell::{
 };
 use ::windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumChildWindows, EnumWindows, GetClassNameW, GetCursorPos,
-    GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId,
+    GetForegroundWindow, GetWindow, GetWindowLongPtrW, SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, GetWindowTextW, GetWindowThreadProcessId,
     IsIconic, IsWindow, IsWindowVisible, SetForegroundWindow, SetWindowLongPtrW, ShowWindow,
     GWL_EXSTYLE, GW_OWNER, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW,
@@ -387,6 +387,20 @@ pub fn set_click_through(win: &WebviewWindow, ignore: bool) {
             if want != ex {
                 SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
             }
+        }
+    });
+}
+
+/// Puts the island back above every other always-on-top window (a full-screen
+/// app, another overlay) without taking the focus. Two "topmost" windows stack
+/// in the order they were last raised, so the notch has to re-assert itself or
+/// it ends up hidden behind whichever app was raised after it.
+pub fn raise_on_top(win: &WebviewWindow) {
+    let w = win.clone();
+    let _ = win.run_on_main_thread(move || {
+        let Some(hwnd) = hwnd_of(&w) else { return };
+        unsafe {
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
     });
 }

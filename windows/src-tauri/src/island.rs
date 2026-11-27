@@ -111,7 +111,7 @@ impl PollGate {
     }
 
     pub fn set_rect(&self, rect: IslandRect) {
-        *self.rect.lock().unwrap() = rect;
+        *self.rect.lock().unwrap_or_else(|e| e.into_inner()) = rect;
     }
 
     /// Forces the next poll tick to re-apply the flag (after a window resize).
@@ -120,13 +120,13 @@ impl PollGate {
     }
 
     pub fn set_active(&self, on: bool) {
-        let mut guard = self.active.lock().unwrap();
+        let mut guard = self.active.lock().unwrap_or_else(|e| e.into_inner());
         *guard = on;
         self.cv.notify_all();
     }
 
     pub(crate) fn wait_until_active(&self) {
-        let mut guard = self.active.lock().unwrap();
+        let mut guard = self.active.lock().unwrap_or_else(|e| e.into_inner());
         while !*guard {
             guard = self.cv.wait(guard).unwrap();
         }
@@ -134,7 +134,7 @@ impl PollGate {
 
     /// Waits until the gate opens or `timeout` passes; true when it is open.
     pub(crate) fn wait_active_for(&self, timeout: Duration) -> bool {
-        let guard = self.active.lock().unwrap();
+        let guard = self.active.lock().unwrap_or_else(|e| e.into_inner());
         if *guard {
             return true;
         }
@@ -143,7 +143,7 @@ impl PollGate {
     }
 
     pub(crate) fn is_active(&self) -> bool {
-        *self.active.lock().unwrap()
+        *self.active.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -498,7 +498,7 @@ pub fn clamp_collapsed((w, h): (f64, f64)) -> (f64, f64) {
 fn current_screen_key(app: &AppHandle) -> Option<(i32, i32, u32, u32, u64)> {
     let pref = app
         .try_state::<crate::Shared>()
-        .map(|s| s.settings.lock().unwrap().screen.clone())
+        .map(|s| s.settings.lock().unwrap_or_else(|e| e.into_inner()).screen.clone())
         .unwrap_or_else(|| "primary".into());
     let m = target_monitor(app, &pref)?;
     let p = m.position();
@@ -509,7 +509,20 @@ fn current_screen_key(app: &AppHandle) -> Option<(i32, i32, u32, u32, u64)> {
 /// Emits `cursor` (window-logical coordinates) at ~60 Hz while the island is
 /// visible. Parked on a condvar the rest of the time.
 pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
-    std::thread::spawn(move || {
+    // The thread that lets the island take the mouse must never die: if one tick
+    // panics, it logs it and starts over instead of leaving a notch nobody can wake.
+    std::thread::spawn(move || loop {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| poll_loop(&app, &gate)));
+        if r.is_err() {
+            crate::log::line("cursor poll crashed — restarting it".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    });
+}
+
+fn poll_loop(app: &AppHandle, gate: &Arc<PollGate>) {
+    {
+        let app = app.clone();
         let mut was_down = false;
         // Remembered across wakes so a display change while hidden is noticed the
         // moment the island comes back.
@@ -575,7 +588,7 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 // Click-through: the window only takes the mouse over the island
                 // shape. A small entry margin means the flag is already off by the
                 // time a moving cursor reaches a button.
-                let r = *gate.rect.lock().unwrap();
+                let r = *gate.rect.lock().unwrap_or_else(|e| e.into_inner());
                 let on_island = r.w > 0.0
                     && x >= r.x - HIT_MARGIN
                     && x <= r.x + r.w + HIT_MARGIN
@@ -610,7 +623,7 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                     // still running as the island folds must not make the
                     // closed island click-through after set_collapsed made it
                     // take the mouse — nothing would ever wake it again.
-                    let active = gate.active.lock().unwrap();
+                    let active = gate.active.lock().unwrap_or_else(|e| e.into_inner());
                     if !*active {
                         break;
                     }
@@ -627,7 +640,7 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 let _ = win.emit("cursor", CursorPayload { x, y });
             }
         }
-    });
+    }
 }
 
 /// The cursor is on the folded window: it takes the mouse, and the page hears
@@ -663,10 +676,10 @@ pub fn refresh_click_through(app: &AppHandle, gate: &PollGate) {
         // The closed island (or the wake strip) itself, never "the whole
         // window": if the window ever fails to shrink, the rest of it must not
         // swallow clicks meant for whatever sits under the top of the screen.
-        let (w, h) = clamp_collapsed(*gate.collapsed_size.lock().unwrap());
+        let (w, h) = clamp_collapsed(*gate.collapsed_size.lock().unwrap_or_else(|e| e.into_inner()));
         Some((0.0, 0.0, w, h))
     } else {
-        let r = *gate.rect.lock().unwrap();
+        let r = *gate.rect.lock().unwrap_or_else(|e| e.into_inner());
         if r.w <= 0.0 {
             // Nothing drawn yet: nothing takes the mouse.
             Some((0.0, 0.0, 0.0, 0.0))
@@ -685,4 +698,59 @@ pub fn set_ignore_cursor(app: &AppHandle, ignore: bool) {
     if let Some(win) = window(app) {
         platform::set_click_through(&win, ignore);
     }
+}
+
+/// Last time the island was brought back by hand (ms since the epoch): asking
+/// twice in a row means the page itself is stuck, and it is reloaded.
+static LAST_REVIVE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// "The notch is gone": shows the window again, puts it back where it belongs,
+/// gives it the mouse and tells the page to wake up. Used when Coucou is opened
+/// a second time, and by the watchdog.
+pub fn revive(app: &AppHandle, gate: &PollGate, pref: &str, reason: &str) {
+    crate::log::line(format!("island revived ({reason})"));
+    let Some(win) = window(app) else { return };
+    let _ = win.show();
+    gate.veil.store(false, Ordering::Relaxed);
+    gate.forget_ignore_state();
+    platform::set_click_through(&win, false);
+    let collapsed = gate.collapsed.load(Ordering::Relaxed);
+    let size = *gate.collapsed_size.lock().unwrap_or_else(|e| e.into_inner());
+    apply_geometry(app, pref, collapsed.then_some(size));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST_REVIVE_MS.swap(now, Ordering::Relaxed);
+    if now.saturating_sub(last) < 20_000 {
+        crate::log::line("island revived twice in a row — reloading its page".to_string());
+        let _ = win.eval("location.reload()");
+    } else {
+        let _ = app.emit_to(WINDOW_LABEL, "island-revive", ());
+    }
+}
+
+/// Every few seconds: is the island's window still shown, and still near the top
+/// of the screen? If not, it comes back by itself.
+pub fn spawn_watchdog(app: AppHandle, gate: Arc<PollGate>, pref: impl Fn() -> String + Send + 'static) {
+    let mut ticks: u32 = 0;
+    std::thread::spawn(move || loop {
+        // Once a second: another always-on-top window (a full-screen app, the
+        // Claude app) raised after the island would hide it for good. Raising it
+        // again is free when nothing is above it.
+        std::thread::sleep(Duration::from_secs(1));
+        let Some(win) = window(&app) else { continue };
+        if win.is_visible().unwrap_or(false) {
+            platform::raise_on_top(&win);
+        }
+        ticks = ticks.wrapping_add(1);
+        if ticks % 5 != 0 {
+            continue;
+        }
+        let hidden = !win.is_visible().unwrap_or(true);
+        let lost = win.outer_position().map(|p| p.y < -5 || p.y > 600).unwrap_or(false);
+        if hidden || lost {
+            revive(&app, &gate, &pref(), if hidden { "window was hidden" } else { "window was off the top" });
+        }
+    });
 }

@@ -896,6 +896,12 @@ fn open_settings_window(app: AppHandle, page: Option<String>) {
 
 pub fn run() {
     platform::prepare_environment();
+    // A crash in any thread leaves a line in the log instead of vanishing silently.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::line(format!("PANIC: {info}"));
+        default_hook(info);
+    }));
     let loaded = settings::load();
     i18n::set_picked(&loaded.language);
     let gate = Arc::new(PollGate::new());
@@ -907,7 +913,13 @@ pub fn run() {
             match shortcuts::from_args(&argv) {
                 Some(action) => shortcuts::dispatch(app, action),
                 // Opening Coucou again (its shortcut, the Start menu) shows its window.
-                None => show_hub(app, None),
+                None => {
+                    show_hub(app, None);
+                    // The notch itself too: if it vanished, opening Coucou again brings it back.
+                    let shared = app.state::<Shared>();
+                    let pref = shared.settings.lock().unwrap().screen.clone();
+                    island::revive(app, &shared.gate, &pref, "Coucou opened again");
+                }
             }
         }))
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![AUTOSTART_ARG])));
@@ -1153,6 +1165,12 @@ pub fn run() {
             }
             gate.set_active(true);
             island::spawn_cursor_poll(handle.clone(), gate.clone());
+            {
+                let watch_handle = handle.clone();
+                island::spawn_watchdog(handle.clone(), gate.clone(), move || {
+                    watch_handle.state::<Shared>().settings.lock().unwrap().screen.clone()
+                });
+            }
 
             log::line(format!("--- Coucou {} started ---", env!("CARGO_PKG_VERSION")));
             hooks::ensure_hook_exe(&handle);

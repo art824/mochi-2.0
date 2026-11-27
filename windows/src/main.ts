@@ -167,6 +167,16 @@ async function main() {
       : null;
   });
 
+  // Rust brought the window back (Coucou opened again, or the watchdog): wake the
+  // island up from scratch, so a stuck notch comes back to life.
+  await onEvent<null>("island-revive", () => {
+    document.body.classList.remove("veiled");
+    island.fsm.forceHidden();
+    void Bridge.reposition();
+    island.ensureRunning();
+    island.reveal();
+  });
+
   // Settings → Reload sounds: read the sounds folder again, and let them hear it.
   await onEvent<null>("sounds-changed", () => {
     void Sound.reload().then(() => Sound.play("pop"));
